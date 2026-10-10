@@ -94,4 +94,29 @@ func TestQuietHookDoesNotClaimReadiness(t *testing.T) {
 	if a.ActivityState != "approval_required" || len(a.ActiveJobIDs) != 1 {
 		t.Fatalf("approval wait hidden by running job: %+v", a)
 	}
+	a = AgentUsage{Phase: "waiting", Detail: "ready for direction", Halt: &Halt{Kind: "context_limit", Code: "context_length_exceeded"}}
+	classifyAgent(&a, nil)
+	if a.ActivityState != "halted_usage" {
+		t.Fatalf("usage halt hidden by quiet hook: %+v", a)
+	}
+}
+
+func TestClaudeUsageErrorClearsAfterSuccessfulResponse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claude.jsonl")
+	errorRow := `{"type":"system","subtype":"api_error","timestamp":"2026-10-10T20:00:00Z","error":{"code":"usage_limit_exceeded","message":"usage limit reached"}}` + "\n"
+	if err := os.WriteFile(path, []byte(errorRow), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := AgentUsage{}
+	if err := readClaudeUsage(path, &a); err != nil || a.Halt == nil || a.Halt.Kind != "usage_limit" {
+		t.Fatalf("Claude usage halt missing: %+v %v", a, err)
+	}
+	success := `{"type":"assistant","sessionId":"session","cwd":"/project","message":{"id":"m1","model":"claude-test","usage":{"output_tokens":1}}}` + "\n"
+	if err := os.WriteFile(path, []byte(errorRow+success), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a = AgentUsage{}
+	if err := readClaudeUsage(path, &a); err != nil || a.Halt != nil {
+		t.Fatalf("resolved Claude error remained active: %+v %v", a, err)
+	}
 }

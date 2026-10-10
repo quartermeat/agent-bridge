@@ -17,26 +17,28 @@ import (
 )
 
 type Job struct {
-	ID          string      `json:"id"`
-	Name        string      `json:"name"`
-	SpawnedBy   *Spawner    `json:"spawned_by"`
-	SessionID   string      `json:"session_id,omitempty"`
-	Cwd         string      `json:"cwd"`
-	Sandbox     string      `json:"sandbox"`
-	Launcher    string      `json:"launcher"`
-	Status      string      `json:"status"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
-	WorkerPID   int         `json:"worker_pid,omitempty"`
-	WorkerStart string      `json:"worker_start,omitempty"`
-	CodexPID    int         `json:"codex_pid,omitempty"`
-	CodexStart  string      `json:"codex_start,omitempty"`
-	ExitCode    *int        `json:"exit_code,omitempty"`
-	Error       string      `json:"error,omitempty"`
-	EventsPath  string      `json:"events_path"`
-	StderrPath  string      `json:"stderr_path"`
-	ResultPath  string      `json:"result_path"`
-	Usage       *TokenUsage `json:"usage,omitempty"`
+	ID             string      `json:"id"`
+	Name           string      `json:"name"`
+	SpawnedBy      *Spawner    `json:"spawned_by"`
+	SessionID      string      `json:"session_id,omitempty"`
+	Cwd            string      `json:"cwd"`
+	Sandbox        string      `json:"sandbox"`
+	Launcher       string      `json:"launcher"`
+	Status         string      `json:"status"`
+	CreatedAt      time.Time   `json:"created_at"`
+	UpdatedAt      time.Time   `json:"updated_at"`
+	WorkerPID      int         `json:"worker_pid,omitempty"`
+	WorkerStart    string      `json:"worker_start,omitempty"`
+	CodexPID       int         `json:"codex_pid,omitempty"`
+	CodexStart     string      `json:"codex_start,omitempty"`
+	ExitCode       *int        `json:"exit_code,omitempty"`
+	Error          string      `json:"error,omitempty"`
+	EventsPath     string      `json:"events_path"`
+	StderrPath     string      `json:"stderr_path"`
+	ResultPath     string      `json:"result_path"`
+	Usage          *TokenUsage `json:"usage,omitempty"`
+	Halt           *Halt       `json:"halt,omitempty"`
+	AcknowledgedAt *time.Time  `json:"acknowledged_at,omitempty"`
 }
 
 type Spawner struct {
@@ -54,7 +56,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|list|show|wait|stop|snapshot|watch|_worker")
+		return errors.New("usage: agent-bridge start|list|show|wait|ack|stop|snapshot|watch|_worker")
 	}
 	switch args[0] {
 	case "start":
@@ -65,6 +67,8 @@ func run(args []string) error {
 		return show(args[1:])
 	case "wait":
 		return wait(args[1:])
+	case "ack":
+		return ack(args[1:])
 	case "stop":
 		return stop(args[1:])
 	case "snapshot":
@@ -299,6 +303,8 @@ func worker(id string) error {
 	j.ExitCode = &code
 	if _, err := os.Stat(filepath.Join(dir, "stop")); err == nil {
 		j.Status = "stopped"
+	} else if j.Halt = detectJobHalt(j.EventsPath, j.StderrPath, time.Now().UTC(), code); j.Halt != nil {
+		j.Status = "halted"
 	} else if code == 0 {
 		j.Status = "completed"
 	} else {
@@ -405,6 +411,16 @@ func current(j Job) Job {
 		}
 		j.Usage = &TokenUsage{Input: event.Usage.Input, CacheRead: event.Usage.Cached, CacheWrite: event.Usage.CacheWrite, Output: event.Usage.Output, Reasoning: event.Usage.Reasoning}
 	})
+	if j.Status == "failed" && j.Halt == nil {
+		code := 1
+		if j.ExitCode != nil {
+			code = *j.ExitCode
+		}
+		j.Halt = detectJobHalt(j.EventsPath, j.StderrPath, j.UpdatedAt, code)
+		if j.Halt != nil {
+			j.Status = "halted"
+		}
+	}
 	return j
 }
 
@@ -482,6 +498,9 @@ func wait(args []string) error {
 			}
 			for _, j := range jobs {
 				if j.Status != "completed" {
+					if j.Halt != nil {
+						return fmt.Errorf("job %s halted: %s (%s)", j.ID, haltLabel(j.Halt), j.Halt.Code)
+					}
 					return fmt.Errorf("job %s ended with status %s", j.ID, j.Status)
 				}
 			}
@@ -489,6 +508,28 @@ func wait(args []string) error {
 		}
 		time.Sleep(*interval)
 	}
+}
+
+func ack(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: agent-bridge ack ID")
+	}
+	j, err := readJob(args[0])
+	if err != nil {
+		return err
+	}
+	j = current(j)
+	if j.Status != "halted" {
+		return fmt.Errorf("job is %s, not halted", j.Status)
+	}
+	if j.AcknowledgedAt == nil {
+		now := time.Now().UTC()
+		j.AcknowledgedAt = &now
+		if err := writeJob(j); err != nil {
+			return err
+		}
+	}
+	return json.NewEncoder(os.Stdout).Encode(j)
 }
 
 func stop(args []string) error {

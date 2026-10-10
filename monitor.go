@@ -42,6 +42,8 @@ type AgentUsage struct {
 	ActivityState string       `json:"activity_state"`
 	StateDetail   string       `json:"state_detail"`
 	ActiveJobIDs  []string     `json:"active_job_ids"`
+	HaltedJobIDs  []string     `json:"halted_job_ids"`
+	Halt          *Halt        `json:"halt,omitempty"`
 	Target        *AgentTarget `json:"target,omitempty"`
 	HostPID       int          `json:"host_pid,omitempty"`
 	SampledAt     time.Time    `json:"sampled_at"`
@@ -168,7 +170,7 @@ func collectSnapshot() (Snapshot, error) {
 				continue
 			}
 			j = current(j)
-			if j.Status == "running" || j.Status == "starting" || j.Status == "queued" || now.Sub(j.UpdatedAt) < time.Hour {
+			if j.Status == "running" || j.Status == "starting" || j.Status == "queued" || (j.Status == "halted" && j.AcknowledgedAt == nil) || now.Sub(j.UpdatedAt) < time.Hour {
 				s.Jobs = append(s.Jobs, j)
 			}
 		}
@@ -191,20 +193,28 @@ func collectSnapshot() (Snapshot, error) {
 
 func classifyAgent(a *AgentUsage, jobs []Job) {
 	a.ActiveJobIDs = []string{}
+	a.HaltedJobIDs = []string{}
 	workerRunning, childRunning := false, false
 	for _, j := range jobs {
+		isWorker := a.Provider == "codex" && j.SessionID != "" && j.SessionID == a.SessionID
+		isParent := j.SpawnedBy != nil && j.SpawnedBy.AgentID == a.ID
+		if j.Status == "halted" && j.AcknowledgedAt == nil && (isWorker || isParent) {
+			a.HaltedJobIDs = append(a.HaltedJobIDs, j.ID)
+		}
 		if j.Status != "queued" && j.Status != "starting" && j.Status != "running" {
 			continue
 		}
-		if a.Provider == "codex" && j.SessionID != "" && j.SessionID == a.SessionID {
+		if isWorker {
 			workerRunning = true
 			a.ActiveJobIDs = append(a.ActiveJobIDs, j.ID)
-		} else if j.SpawnedBy != nil && j.SpawnedBy.AgentID == a.ID {
+		} else if isParent {
 			childRunning = true
 			a.ActiveJobIDs = append(a.ActiveJobIDs, j.ID)
 		}
 	}
 	switch {
+	case a.Halt != nil:
+		a.ActivityState, a.StateDetail = "halted_usage", haltLabel(a.Halt)
 	case a.Phase == "error":
 		a.ActivityState, a.StateDetail = "error", a.Detail
 	case a.Phase == "waiting" && strings.HasPrefix(a.Detail, "approval requested"):
@@ -216,6 +226,8 @@ func classifyAgent(a *AgentUsage, jobs []Job) {
 	case childRunning:
 		a.ActivityState = "has_running_children"
 		a.StateDetail = fmt.Sprintf("%d spawned bridge job(s) still running", len(a.ActiveJobIDs))
+	case len(a.HaltedJobIDs) > 0 && (a.Phase == "waiting" || a.Phase == "idle"):
+		a.ActivityState, a.StateDetail = "halted_usage", "spawned job halted by token or usage limit"
 	default:
 		a.ActivityState, a.StateDetail = "unverified", "hook is quiet; readiness unverified"
 	}
@@ -325,9 +337,12 @@ func readClaudeUsage(path string, a *AgentUsage) error {
 	cwds := map[string]int{}
 	err := scanJSONLines(path, func(line []byte) {
 		var row struct {
-			Type      string `json:"type"`
-			SessionID string `json:"sessionId"`
-			Cwd       string `json:"cwd"`
+			Type      string          `json:"type"`
+			Subtype   string          `json:"subtype"`
+			Timestamp string          `json:"timestamp"`
+			Error     json.RawMessage `json:"error"`
+			SessionID string          `json:"sessionId"`
+			Cwd       string          `json:"cwd"`
 			Message   struct {
 				ID    string `json:"id"`
 				Model string `json:"model"`
@@ -339,9 +354,24 @@ func readClaudeUsage(path string, a *AgentUsage) error {
 				} `json:"usage"`
 			} `json:"message"`
 		}
-		if json.Unmarshal(line, &row) != nil || row.Type != "assistant" || row.Message.ID == "" {
+		if json.Unmarshal(line, &row) != nil {
 			return
 		}
+		if row.Type == "system" && row.Subtype == "api_error" {
+			code, message := errorFields(row.Error)
+			at, err := time.Parse(time.RFC3339Nano, row.Timestamp)
+			if err != nil {
+				at = time.Now().UTC()
+			}
+			if found := classifyUsageError(code, message, "claude_api_error", at); found != nil {
+				a.Halt = found
+			}
+			return
+		}
+		if row.Type != "assistant" || row.Message.ID == "" {
+			return
+		}
+		a.Halt = nil // A later successful response resolved any prior API error.
 		a.SessionID, a.Model = row.SessionID, row.Message.Model
 		if row.Cwd != "" {
 			cwds[row.Cwd]++
@@ -426,6 +456,16 @@ func watchCommand(args []string) error {
 		}
 		fmt.Print("\x1b[H\x1b[2J")
 		fmt.Printf("Claude / Codex activity — %s UTC (Ctrl-C to exit)\n\n", s.SampledAt.Format("15:04:05"))
+		for _, a := range s.Agents {
+			if a.Halt != nil {
+				fmt.Printf("*** %s HALTED: %s (%s) ***\n", a.Name, haltLabel(a.Halt), a.Halt.Code)
+			}
+		}
+		for _, j := range s.Jobs {
+			if j.Halt != nil && j.AcknowledgedAt == nil {
+				fmt.Printf("*** JOB %s HALTED: %s (%s) ***\n", j.ID, haltLabel(j.Halt), j.Halt.Code)
+			}
+		}
 		if len(s.Agents) == 0 {
 			fmt.Println("No fresh Claude or Codex activity hooks.")
 		}
@@ -462,6 +502,9 @@ func watchCommand(args []string) error {
 			}
 			if j.SpawnedBy != nil {
 				fmt.Printf("  spawned by %s", j.SpawnedBy.AgentID)
+			}
+			if j.Halt != nil {
+				fmt.Printf("  %s", haltLabel(j.Halt))
 			}
 			fmt.Println()
 		}
