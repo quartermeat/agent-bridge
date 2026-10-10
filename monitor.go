@@ -464,6 +464,13 @@ func watchCommand(args []string) error {
 		for _, j := range s.Jobs {
 			if j.Halt != nil && j.AcknowledgedAt == nil {
 				fmt.Printf("*** JOB %s HALTED: %s (%s) ***\n", j.ID, haltLabel(j.Halt), j.Halt.Code)
+				if j.SpawnedBy != nil && j.SpawnedBy.Provider == "claude" && j.Halt.Kind == "usage_limit" {
+					if j.Halt.Scope == "account" {
+						fmt.Println("    Claude decision pending: finish scoped task or defer until Codex resets; viewer is read-only.")
+					} else if j.Halt.Scope == "unknown" {
+						fmt.Println("    Claude decision pending: verify limit scope, then finish or defer; viewer is read-only.")
+					}
+				}
 			}
 		}
 		if len(s.Agents) == 0 {

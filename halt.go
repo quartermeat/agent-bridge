@@ -12,6 +12,7 @@ import (
 // which can contain request details.
 type Halt struct {
 	Kind       string    `json:"kind"`
+	Scope      string    `json:"scope"`
 	Code       string    `json:"code"`
 	Source     string    `json:"source"`
 	DetectedAt time.Time `json:"detected_at"`
@@ -21,33 +22,38 @@ func classifyUsageError(code, message, source string, at time.Time) *Halt {
 	c := strings.ToLower(strings.TrimSpace(code))
 	m := strings.ToLower(message)
 	kind := ""
+	scope := "unknown"
 	switch c {
 	case "context_length_exceeded", "context_window_exceeded", "max_tokens_exceeded", "token_limit_exceeded":
-		kind = "context_limit"
-	case "session_budget_exceeded", "usage_limit_exceeded", "organization_usage_limit_exceeded", "credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded", "project_spend_limit_exceeded":
+		kind, scope = "context_limit", "session"
+	case "session_budget_exceeded":
+		kind, scope = "usage_limit", "session"
+	case "usage_limit_exceeded":
 		kind = "usage_limit"
+	case "organization_usage_limit_exceeded", "credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded", "project_spend_limit_exceeded":
+		kind, scope = "usage_limit", "account"
 	case "rate_limit_exceeded", "tokens_per_minute_exceeded":
-		kind = "rate_limit"
+		kind, scope = "rate_limit", "temporary"
 	}
 	if kind == "" {
 		switch {
 		case strings.Contains(m, "context window") && (strings.Contains(m, "exceed") || strings.Contains(m, "full")),
 			strings.Contains(m, "maximum context length"),
 			strings.Contains(m, "context length exceeded"):
-			kind, c = "context_limit", "context_length_exceeded"
+			kind, scope, c = "context_limit", "session", "context_length_exceeded"
 		case strings.Contains(m, "usage limit") && (strings.Contains(m, "reach") || strings.Contains(m, "exceed") || strings.Contains(m, "hit")),
 			strings.Contains(m, "out of tokens"),
 			strings.Contains(m, "credit balance exhausted"),
 			strings.Contains(m, "quota exceeded"):
 			kind, c = "usage_limit", "usage_limit_exceeded"
 		case strings.Contains(m, "rate limit exceeded") || strings.Contains(m, "too many tokens per minute"):
-			kind, c = "rate_limit", "rate_limit_exceeded"
+			kind, scope, c = "rate_limit", "temporary", "rate_limit_exceeded"
 		}
 	}
 	if kind == "" {
 		return nil
 	}
-	return &Halt{Kind: kind, Code: c, Source: source, DetectedAt: at}
+	return &Halt{Kind: kind, Scope: scope, Code: c, Source: source, DetectedAt: at}
 }
 
 func detectJobHalt(eventsPath, stderrPath string, at time.Time, exitCode int) *Halt {

@@ -10,16 +10,16 @@ import (
 
 func TestUsageHaltClassification(t *testing.T) {
 	at := time.Now().UTC()
-	for _, tc := range []struct{ code, message, kind string }{
-		{"context_length_exceeded", "", "context_limit"},
-		{"session_budget_exceeded", "", "usage_limit"},
-		{"credit_balance_exhausted", "", "usage_limit"},
-		{"rate_limit_exceeded", "", "rate_limit"},
-		{"", "You've hit your usage limit", "usage_limit"},
+	for _, tc := range []struct{ code, message, kind, scope string }{
+		{"context_length_exceeded", "", "context_limit", "session"},
+		{"session_budget_exceeded", "", "usage_limit", "session"},
+		{"credit_balance_exhausted", "", "usage_limit", "account"},
+		{"rate_limit_exceeded", "", "rate_limit", "temporary"},
+		{"", "You've hit your usage limit", "usage_limit", "unknown"},
 	} {
 		got := classifyUsageError(tc.code, tc.message, "test", at)
-		if got == nil || got.Kind != tc.kind {
-			t.Fatalf("classify %q %q = %+v, want %s", tc.code, tc.message, got, tc.kind)
+		if got == nil || got.Kind != tc.kind || got.Scope != tc.scope {
+			t.Fatalf("classify %q %q = %+v, want %s/%s", tc.code, tc.message, got, tc.kind, tc.scope)
 		}
 	}
 	if got := classifyUsageError("server_overloaded", "temporary failure", "test", at); got != nil {
