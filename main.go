@@ -16,23 +16,24 @@ import (
 )
 
 type Job struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Cwd         string    `json:"cwd"`
-	Sandbox     string    `json:"sandbox"`
-	Launcher    string    `json:"launcher"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	WorkerPID   int       `json:"worker_pid,omitempty"`
-	WorkerStart string    `json:"worker_start,omitempty"`
-	CodexPID    int       `json:"codex_pid,omitempty"`
-	CodexStart  string    `json:"codex_start,omitempty"`
-	ExitCode    *int      `json:"exit_code,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	EventsPath  string    `json:"events_path"`
-	StderrPath  string    `json:"stderr_path"`
-	ResultPath  string    `json:"result_path"`
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Cwd         string      `json:"cwd"`
+	Sandbox     string      `json:"sandbox"`
+	Launcher    string      `json:"launcher"`
+	Status      string      `json:"status"`
+	CreatedAt   time.Time   `json:"created_at"`
+	UpdatedAt   time.Time   `json:"updated_at"`
+	WorkerPID   int         `json:"worker_pid,omitempty"`
+	WorkerStart string      `json:"worker_start,omitempty"`
+	CodexPID    int         `json:"codex_pid,omitempty"`
+	CodexStart  string      `json:"codex_start,omitempty"`
+	ExitCode    *int        `json:"exit_code,omitempty"`
+	Error       string      `json:"error,omitempty"`
+	EventsPath  string      `json:"events_path"`
+	StderrPath  string      `json:"stderr_path"`
+	ResultPath  string      `json:"result_path"`
+	Usage       *TokenUsage `json:"usage,omitempty"`
 }
 
 func main() {
@@ -44,7 +45,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|list|show|stop|_worker")
+		return errors.New("usage: agent-bridge start|list|show|stop|snapshot|watch|_worker")
 	}
 	switch args[0] {
 	case "start":
@@ -55,6 +56,10 @@ func run(args []string) error {
 		return show(args[1:])
 	case "stop":
 		return stop(args[1:])
+	case "snapshot":
+		return snapshotCommand(args[1:])
+	case "watch":
+		return watchCommand(args[1:])
 	case "_worker":
 		if len(args) != 2 {
 			return errors.New("worker needs a job ID")
@@ -316,6 +321,22 @@ func current(j Job) Job {
 	if (j.Status == "queued" || j.Status == "starting" || j.Status == "running") && j.WorkerPID != 0 && !alive(j.WorkerPID, j.WorkerStart) && time.Since(j.UpdatedAt) > 5*time.Second {
 		j.Status = "lost"
 	}
+	_ = scanJSONLines(j.EventsPath, func(line []byte) {
+		var event struct {
+			Type  string `json:"type"`
+			Usage struct {
+				Input      int64 `json:"input_tokens"`
+				Cached     int64 `json:"cached_input_tokens"`
+				CacheWrite int64 `json:"cache_write_input_tokens"`
+				Output     int64 `json:"output_tokens"`
+				Reasoning  int64 `json:"reasoning_output_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(line, &event) != nil || event.Type != "turn.completed" {
+			return
+		}
+		j.Usage = &TokenUsage{Input: event.Usage.Input, CacheRead: event.Usage.Cached, CacheWrite: event.Usage.CacheWrite, Output: event.Usage.Output, Reasoning: event.Usage.Reasoning}
+	})
 	return j
 }
 
