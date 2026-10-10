@@ -30,6 +30,16 @@ func TestStartAndObserve(t *testing.T) {
 		t.Fatalf("start: %v: %s", err, out)
 	}
 	id := strings.TrimSpace(string(out))
+	wait := exec.Command(bin, "wait", "--interval", "100ms", id)
+	wait.Env = start.Env
+	waitOut, err := wait.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wait: %v: %s", err, waitOut)
+	}
+	var waited []Job
+	if err := json.Unmarshal(waitOut, &waited); err != nil || len(waited) != 1 || waited[0].Status != "completed" {
+		t.Fatalf("wait result: %v: %s", err, waitOut)
+	}
 	var job Job
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

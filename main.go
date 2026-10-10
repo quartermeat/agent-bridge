@@ -45,7 +45,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|list|show|stop|snapshot|watch|_worker")
+		return errors.New("usage: agent-bridge start|list|show|wait|stop|snapshot|watch|_worker")
 	}
 	switch args[0] {
 	case "start":
@@ -54,6 +54,8 @@ func run(args []string) error {
 		return list(args[1:])
 	case "show":
 		return show(args[1:])
+	case "wait":
+		return wait(args[1:])
 	case "stop":
 		return stop(args[1:])
 	case "snapshot":
@@ -377,6 +379,50 @@ func show(args []string) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(current(j))
+}
+
+func wait(args []string) error {
+	f := flag.NewFlagSet("wait", flag.ContinueOnError)
+	interval := f.Duration("interval", 2*time.Second, "Status polling interval (at least 100ms)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	ids := f.Args()
+	if len(ids) == 0 || *interval < 100*time.Millisecond {
+		return errors.New("usage: agent-bridge wait [--interval 2s] ID [ID ...]")
+	}
+	for _, id := range ids {
+		if _, err := readJob(id); err != nil {
+			return err
+		}
+	}
+	for {
+		jobs := make([]Job, 0, len(ids))
+		allDone := true
+		for _, id := range ids {
+			j, err := readJob(id)
+			if err != nil {
+				return err
+			}
+			j = current(j)
+			jobs = append(jobs, j)
+			if j.Status == "queued" || j.Status == "starting" || j.Status == "running" {
+				allDone = false
+			}
+		}
+		if allDone {
+			if err := json.NewEncoder(os.Stdout).Encode(jobs); err != nil {
+				return err
+			}
+			for _, j := range jobs {
+				if j.Status != "completed" {
+					return fmt.Errorf("job %s ended with status %s", j.ID, j.Status)
+				}
+			}
+			return nil
+		}
+		time.Sleep(*interval)
+	}
 }
 
 func stop(args []string) error {
