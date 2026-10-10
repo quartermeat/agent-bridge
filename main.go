@@ -1,0 +1,358 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+)
+
+type Job struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Cwd        string    `json:"cwd"`
+	Sandbox    string    `json:"sandbox"`
+	Launcher   string    `json:"launcher"`
+	Status     string    `json:"status"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	WorkerPID  int       `json:"worker_pid,omitempty"`
+	CodexPID   int       `json:"codex_pid,omitempty"`
+	ExitCode   *int      `json:"exit_code,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	EventsPath string    `json:"events_path"`
+	StderrPath string    `json:"stderr_path"`
+	ResultPath string    `json:"result_path"`
+}
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: agent-bridge start|list|show|stop|_worker")
+	}
+	switch args[0] {
+	case "start":
+		return start(args[1:])
+	case "list":
+		return list(args[1:])
+	case "show":
+		return show(args[1:])
+	case "stop":
+		return stop(args[1:])
+	case "_worker":
+		if len(args) != 2 {
+			return errors.New("worker needs a job ID")
+		}
+		return worker(args[1])
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func root() (string, error) {
+	if override := os.Getenv("AGENT_BRIDGE_STATE_DIR"); override != "" {
+		return override, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "agent-bridge"), nil
+}
+
+func jobDir(id string) (string, error) {
+	if len(id) == 0 || strings.ContainsAny(id, `/\.`) {
+		return "", errors.New("invalid job ID")
+	}
+	r, err := root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(r, "jobs", id), nil
+}
+
+func readJob(id string) (Job, error) {
+	dir, err := jobDir(id)
+	if err != nil {
+		return Job{}, err
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "job.json"))
+	if err != nil {
+		return Job{}, err
+	}
+	var j Job
+	err = json.Unmarshal(b, &j)
+	return j, err
+}
+
+func writeJob(j Job) error {
+	dir, err := jobDir(j.ID)
+	if err != nil {
+		return err
+	}
+	j.UpdatedAt = time.Now().UTC()
+	b, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, "job.json.tmp")
+	if err := os.WriteFile(tmp, append(b, '\n'), 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, "job.json"))
+}
+
+func start(args []string) error {
+	f := flag.NewFlagSet("start", flag.ContinueOnError)
+	cwd := f.String("cwd", "", "Git worktree or project directory")
+	name := f.String("name", "", "Short job label")
+	write := f.Bool("write", false, "Allow workspace-write sandbox")
+	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *cwd == "" {
+		return errors.New("--cwd is required")
+	}
+	if f.NArg() != 0 {
+		return errors.New("pass prompt on stdin or with --prompt-file")
+	}
+	abs, err := filepath.Abs(*cwd)
+	if err != nil {
+		return err
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() {
+		return errors.New("--cwd must be a directory")
+	}
+	var prompt []byte
+	if *promptFile != "" {
+		prompt, err = os.ReadFile(*promptFile)
+	} else {
+		prompt, err = io.ReadAll(io.LimitReader(os.Stdin, 1<<20+1))
+	}
+	if err != nil {
+		return err
+	}
+	if len(prompt) == 0 || len(prompt) > 1<<20 {
+		return errors.New("prompt must be 1 byte to 1 MiB")
+	}
+	r, err := root()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(r, "jobs"), 0700); err != nil {
+		return err
+	}
+	id := fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405"), os.Getpid())
+	dir, _ := jobDir(id)
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), prompt, 0600); err != nil {
+		return err
+	}
+	sandbox := "read-only"
+	if *write {
+		sandbox = "workspace-write"
+	}
+	launcher := "systemd"
+	if os.Getenv("AGENT_BRIDGE_LAUNCH_MODE") == "direct" {
+		launcher = "direct"
+	}
+	j := Job{ID: id, Name: *name, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt")}
+	if err := writeJob(j); err != nil {
+		return err
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if os.Getenv("AGENT_BRIDGE_LAUNCH_MODE") != "direct" {
+		codexBin := os.Getenv("AGENT_BRIDGE_CODEX_BIN")
+		if codexBin == "" {
+			codexBin = "codex"
+		}
+		if codexBin, err = exec.LookPath(codexBin); err != nil {
+			return err
+		}
+		cmd := exec.Command("systemd-run", "--user", "--quiet", "--collect", "--service-type=exec", "--unit=agent-bridge-"+id,
+			"--setenv=AGENT_BRIDGE_STATE_DIR="+r, "--setenv=AGENT_BRIDGE_CODEX_BIN="+codexBin, self, "_worker", id)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			j.Status, j.Error = "failed", strings.TrimSpace(string(out))
+			_ = writeJob(j)
+			return fmt.Errorf("systemd-run: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		fmt.Println(id)
+		return nil
+	}
+	cmd := exec.Command(self, "_worker", id)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		j.Status, j.Error = "failed", err.Error()
+		_ = writeJob(j)
+		return err
+	}
+	fmt.Println(id)
+	return cmd.Process.Release()
+}
+
+func worker(id string) error {
+	syscall.Umask(0077)
+	j, err := readJob(id)
+	if err != nil {
+		return err
+	}
+	dir, _ := jobDir(id)
+	j.WorkerPID = os.Getpid()
+	j.Status = "starting"
+	if err := writeJob(j); err != nil {
+		return err
+	}
+	defer os.Remove(filepath.Join(dir, "prompt.txt"))
+	stdin, err := os.Open(filepath.Join(dir, "prompt.txt"))
+	if err != nil {
+		return finishError(&j, err)
+	}
+	defer stdin.Close()
+	events, err := os.OpenFile(j.EventsPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return finishError(&j, err)
+	}
+	defer events.Close()
+	stderr, err := os.OpenFile(j.StderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return finishError(&j, err)
+	}
+	defer stderr.Close()
+	bin := os.Getenv("AGENT_BRIDGE_CODEX_BIN")
+	if bin == "" {
+		bin = "codex"
+	}
+	cmd := exec.Command(bin, "exec", "--json", "--sandbox", j.Sandbox, "--cd", j.Cwd, "--output-last-message", j.ResultPath, "-")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, events, stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return finishError(&j, err)
+	}
+	j.CodexPID = cmd.Process.Pid
+	j.Status = "running"
+	if err := writeJob(j); err != nil {
+		syscall.Kill(-j.CodexPID, syscall.SIGTERM)
+		return err
+	}
+	err = cmd.Wait()
+	code := 0
+	if err != nil {
+		var e *exec.ExitError
+		if errors.As(err, &e) {
+			code = e.ExitCode()
+		} else {
+			return finishError(&j, err)
+		}
+	}
+	j.ExitCode = &code
+	if _, err := os.Stat(filepath.Join(dir, "stop")); err == nil {
+		j.Status = "stopped"
+	} else if code == 0 {
+		j.Status = "completed"
+	} else {
+		j.Status = "failed"
+	}
+	return writeJob(j)
+}
+
+func finishError(j *Job, err error) error {
+	j.Status, j.Error = "failed", err.Error()
+	_ = writeJob(*j)
+	return err
+}
+
+func alive(pid int) bool { return pid > 0 && syscall.Kill(pid, 0) == nil }
+
+func current(j Job) Job {
+	if (j.Status == "queued" || j.Status == "starting" || j.Status == "running") && j.WorkerPID != 0 && !alive(j.WorkerPID) && time.Since(j.UpdatedAt) > 5*time.Second {
+		j.Status = "lost"
+	}
+	return j
+}
+
+func list(args []string) error {
+	if len(args) != 0 {
+		return errors.New("list takes no arguments")
+	}
+	r, err := root()
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(filepath.Join(r, "jobs"))
+	if os.IsNotExist(err) {
+		fmt.Println("[]")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	jobs := make([]Job, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			if j, err := readJob(e.Name()); err == nil {
+				jobs = append(jobs, current(j))
+			}
+		}
+	}
+	sort.Slice(jobs, func(i, k int) bool { return jobs[i].CreatedAt.After(jobs[k].CreatedAt) })
+	return json.NewEncoder(os.Stdout).Encode(jobs)
+}
+
+func show(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: agent-bridge show ID")
+	}
+	j, err := readJob(args[0])
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(current(j))
+}
+
+func stop(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: agent-bridge stop ID")
+	}
+	j, err := readJob(args[0])
+	if err != nil {
+		return err
+	}
+	if j.Status != "running" {
+		return fmt.Errorf("job is %s", j.Status)
+	}
+	dir, _ := jobDir(j.ID)
+	if err := os.WriteFile(filepath.Join(dir, "stop"), nil, 0600); err != nil {
+		return err
+	}
+	if !alive(j.WorkerPID) || !alive(j.CodexPID) {
+		return errors.New("job process is no longer running")
+	}
+	return syscall.Kill(-j.CodexPID, syscall.SIGTERM)
+}
