@@ -21,7 +21,7 @@ func TestSnapshotMapsActivityToUsage(t *testing.T) {
 	claudeID := "11111111-1111-1111-1111-111111111111"
 	codexID := "22222222-2222-2222-2222-222222222222"
 	fixtures := []struct{ id, name, phase string }{
-		{"claude-" + shortHash("claude:"+claudeID), "Claude", "thinking"},
+		{"claude-" + shortHash("claude:"+claudeID), "Claude", "waiting"},
 		{"codex-" + shortHash(codexID), "Codex", "tool"},
 	}
 	for _, f := range fixtures {
@@ -77,5 +77,21 @@ func TestSnapshotMapsActivityToUsage(t *testing.T) {
 	}
 	if len(s.Jobs) != 1 || s.Jobs[0].SessionID != codexID || s.Agents[1].SpawnedBy == nil || s.Agents[1].SpawnedBy.AgentID != fixtures[0].id {
 		t.Fatalf("spawn relationship missing: jobs=%+v agent=%+v", s.Jobs, s.Agents[1])
+	}
+	if s.Agents[0].ActivityState != "has_running_children" || len(s.Agents[0].ActiveJobIDs) != 1 || s.Agents[1].ActivityState != "running_job" {
+		t.Fatalf("incorrect job-aware states: Claude=%+v Codex=%+v", s.Agents[0], s.Agents[1])
+	}
+}
+
+func TestQuietHookDoesNotClaimReadiness(t *testing.T) {
+	a := AgentUsage{Phase: "waiting", Detail: "ready for direction", ActiveJobIDs: []string{}}
+	classifyAgent(&a, nil)
+	if a.ActivityState != "unverified" || a.StateDetail == "ready for direction" {
+		t.Fatalf("quiet hook claimed readiness: %+v", a)
+	}
+	a = AgentUsage{ID: "codex-worker", Provider: "codex", SessionID: "worker-session", Phase: "waiting", Detail: "approval requested for Bash"}
+	classifyAgent(&a, []Job{{ID: "job", SessionID: "worker-session", Status: "running"}})
+	if a.ActivityState != "approval_required" || len(a.ActiveJobIDs) != 1 {
+		t.Fatalf("approval wait hidden by running job: %+v", a)
 	}
 }

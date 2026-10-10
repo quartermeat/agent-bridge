@@ -34,20 +34,23 @@ type SourceStatus struct {
 }
 
 type AgentUsage struct {
-	ID         string       `json:"id"`
-	Provider   string       `json:"provider"`
-	Name       string       `json:"name"`
-	Phase      string       `json:"phase"`
-	Detail     string       `json:"detail,omitempty"`
-	Target     *AgentTarget `json:"target,omitempty"`
-	HostPID    int          `json:"host_pid,omitempty"`
-	SampledAt  time.Time    `json:"sampled_at"`
-	SessionID  string       `json:"session_id,omitempty"`
-	Cwd        string       `json:"cwd,omitempty"`
-	Model      string       `json:"model,omitempty"`
-	SpawnedBy  *Spawner     `json:"spawned_by"`
-	UsageKnown bool         `json:"usage_known"`
-	Usage      TokenUsage   `json:"usage"`
+	ID            string       `json:"id"`
+	Provider      string       `json:"provider"`
+	Name          string       `json:"name"`
+	Phase         string       `json:"phase"`
+	Detail        string       `json:"detail,omitempty"`
+	ActivityState string       `json:"activity_state"`
+	StateDetail   string       `json:"state_detail"`
+	ActiveJobIDs  []string     `json:"active_job_ids"`
+	Target        *AgentTarget `json:"target,omitempty"`
+	HostPID       int          `json:"host_pid,omitempty"`
+	SampledAt     time.Time    `json:"sampled_at"`
+	SessionID     string       `json:"session_id,omitempty"`
+	Cwd           string       `json:"cwd,omitempty"`
+	Model         string       `json:"model,omitempty"`
+	SpawnedBy     *Spawner     `json:"spawned_by"`
+	UsageKnown    bool         `json:"usage_known"`
+	Usage         TokenUsage   `json:"usage"`
 }
 
 type AgentTarget struct {
@@ -181,8 +184,41 @@ func collectSnapshot() (Snapshot, error) {
 				break
 			}
 		}
+		classifyAgent(&s.Agents[i], s.Jobs)
 	}
 	return s, nil
+}
+
+func classifyAgent(a *AgentUsage, jobs []Job) {
+	a.ActiveJobIDs = []string{}
+	workerRunning, childRunning := false, false
+	for _, j := range jobs {
+		if j.Status != "queued" && j.Status != "starting" && j.Status != "running" {
+			continue
+		}
+		if a.Provider == "codex" && j.SessionID != "" && j.SessionID == a.SessionID {
+			workerRunning = true
+			a.ActiveJobIDs = append(a.ActiveJobIDs, j.ID)
+		} else if j.SpawnedBy != nil && j.SpawnedBy.AgentID == a.ID {
+			childRunning = true
+			a.ActiveJobIDs = append(a.ActiveJobIDs, j.ID)
+		}
+	}
+	switch {
+	case a.Phase == "error":
+		a.ActivityState, a.StateDetail = "error", a.Detail
+	case a.Phase == "waiting" && strings.HasPrefix(a.Detail, "approval requested"):
+		a.ActivityState, a.StateDetail = "approval_required", a.Detail
+	case workerRunning:
+		a.ActivityState, a.StateDetail = "running_job", "bridge job still running"
+	case a.Phase == "thinking" || a.Phase == "working" || a.Phase == "tool":
+		a.ActivityState, a.StateDetail = "active", a.Detail
+	case childRunning:
+		a.ActivityState = "has_running_children"
+		a.StateDetail = fmt.Sprintf("%d spawned bridge job(s) still running", len(a.ActiveJobIDs))
+	default:
+		a.ActivityState, a.StateDetail = "unverified", "hook is quiet; readiness unverified"
+	}
 }
 
 func activityCurrent(path string, a activityFile, now time.Time) (int, bool) {
@@ -395,7 +431,7 @@ func watchCommand(args []string) error {
 		}
 		for _, a := range s.Agents {
 			prior, seen := previous[a.ID]
-			fmt.Printf("%-7s %-9s %-20s %s\n", a.Name, a.Phase, a.Model, a.Cwd)
+			fmt.Printf("%-7s %-20s %-20s %s\n", a.Name, a.ActivityState, a.Model, a.Cwd)
 			if !a.UsageKnown {
 				fmt.Print("  usage pending")
 			} else {
@@ -405,7 +441,7 @@ func watchCommand(args []string) error {
 				}
 				fmt.Printf("  input %d (+%d)  cache read %d  cache write %d  output %d (+%d)", a.Usage.Input, inputDelta, a.Usage.CacheRead, a.Usage.CacheWrite, a.Usage.Output, outputDelta)
 			}
-			fmt.Printf("  %s", a.Detail)
+			fmt.Printf("  %s (hook: %s)", a.StateDetail, a.Phase)
 			if a.SpawnedBy != nil {
 				fmt.Printf("  spawned by %s", a.SpawnedBy.AgentID)
 			}

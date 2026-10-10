@@ -17,6 +17,8 @@ Input tokens include cached reads and cache writes; those components are also sh
 
 The activity hooks must be running to report an agent's current phase. If they are absent, `sources` indicates that limitation and bridge jobs remain visible. Reading `snapshot` does not require the Digital Terrarium app or HTTP service to be running.
 
+The hook's `phase` and `detail` are raw reports. In particular, its “ready for direction” detail can mean either a completed turn or a watchdog fallback after activity events went quiet. Consumers should use `activity_state`, `state_detail`, and `active_job_ids` for the job-aware view: `running_job`, `has_running_children`, `active`, `approval_required`, `error`, or `unverified`. `unverified` deliberately makes no claim that the agent is available. The terminal `watch` command displays this state and keeps the raw hook phase in parentheses.
+
 ## Launch Codex jobs
 
 Build with `go build -o ~/.local/bin/agent-bridge .`.
