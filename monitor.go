@@ -450,12 +450,17 @@ func watchCommand(args []string) error {
 	}
 	previous := map[string]TokenUsage{}
 	for {
-		s, err := collectSnapshot()
+		s, err := readLatest(10 * time.Second)
+		origin := "daemon"
 		if err != nil {
-			return err
+			origin = "direct"
+			s, err = collectSnapshot()
+			if err != nil {
+				return err
+			}
 		}
 		fmt.Print("\x1b[H\x1b[2J")
-		fmt.Printf("Claude / Codex activity — %s UTC (Ctrl-C to exit)\n\n", s.SampledAt.Format("15:04:05"))
+		fmt.Printf("Claude / Codex activity — %s UTC (%s; Ctrl-C to exit)\n\n", s.SampledAt.Format("15:04:05"), origin)
 		for _, a := range s.Agents {
 			if a.Halt != nil {
 				fmt.Printf("*** %s HALTED: %s (%s) ***\n", a.Name, haltLabel(a.Halt), a.Halt.Code)

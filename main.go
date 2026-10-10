@@ -56,7 +56,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|list|show|wait|ack|stop|snapshot|watch|_worker")
+		return errors.New("usage: agent-bridge start|list|show|wait|ack|stop|snapshot|latest|watch|daemon|_worker")
 	}
 	switch args[0] {
 	case "start":
@@ -73,8 +73,12 @@ func run(args []string) error {
 		return stop(args[1:])
 	case "snapshot":
 		return snapshotCommand(args[1:])
+	case "latest":
+		return latestCommand(args[1:])
 	case "watch":
 		return watchCommand(args[1:])
+	case "daemon":
+		return daemonCommand(args[1:])
 	case "_worker":
 		if len(args) != 2 {
 			return errors.New("worker needs a job ID")

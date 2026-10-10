@@ -1,0 +1,13 @@
+[Unit]
+Description=Agent Bridge Claude and Codex activity monitor
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-bridge daemon --interval 2s
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

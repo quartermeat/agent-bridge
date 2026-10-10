@@ -6,8 +6,24 @@ Launch observable Codex CLI jobs from Claude Code or any shell. Jobs run in sepa
 
 ```bash
 agent-bridge snapshot                 # one machine-readable JSON sample
+agent-bridge latest                   # most recent daemon sample; fails if stale
 agent-bridge watch --interval 2s      # live terminal view; Ctrl-C to exit
 ```
+
+## Background monitor
+
+Build and install the binary, then enable the user service:
+
+```bash
+go build -o ~/.local/bin/agent-bridge .
+install -Dm644 packaging/agent-bridge-monitor.service ~/.config/systemd/user/agent-bridge-monitor.service
+systemctl --user daemon-reload
+systemctl --user enable --now agent-bridge-monitor.service
+```
+
+The daemon starts under the user systemd manager and refreshes `~/.local/state/agent-bridge/latest.json` every two seconds. It writes the file atomically with user-only permissions. Other monitors can read that file or call `agent-bridge latest`; `latest` exits nonzero if the sample is older than ten seconds. `snapshot` always collects a fresh sample. `watch` uses the daemon's sample when available and falls back to direct sampling otherwise. Closing the viewer window does not stop the daemon.
+
+Check its state with `systemctl --user status agent-bridge-monitor.service` and recent errors with `journalctl --user -u agent-bridge-monitor.service -n 50`. To stop it for this session, run `systemctl --user stop agent-bridge-monitor.service`. To keep it off across boots, run `systemctl --user disable --now agent-bridge-monitor.service`; resume with `systemctl --user enable --now agent-bridge-monitor.service`. Boot startup also requires user lingering (`loginctl show-user "$USER" -p Linger`), which is already enabled on this workstation.
 
 The snapshot combines Claude Code and Codex activity from the existing Digital Terrarium lifecycle hooks with token counters from their local session logs. It reports phase, safe activity detail, model, project path, process ID, and session input/output tokens when available. A session that has not written usage yet has `usage_known: false`. `watch` shows the change in input and output tokens between refreshes. `jobs` lists recent Codex jobs launched through this bridge, including exit status and completed-turn usage.
 
