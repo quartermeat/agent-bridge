@@ -16,21 +16,23 @@ import (
 )
 
 type Job struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Cwd        string    `json:"cwd"`
-	Sandbox    string    `json:"sandbox"`
-	Launcher   string    `json:"launcher"`
-	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	WorkerPID  int       `json:"worker_pid,omitempty"`
-	CodexPID   int       `json:"codex_pid,omitempty"`
-	ExitCode   *int      `json:"exit_code,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	EventsPath string    `json:"events_path"`
-	StderrPath string    `json:"stderr_path"`
-	ResultPath string    `json:"result_path"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Cwd         string    `json:"cwd"`
+	Sandbox     string    `json:"sandbox"`
+	Launcher    string    `json:"launcher"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	WorkerPID   int       `json:"worker_pid,omitempty"`
+	WorkerStart string    `json:"worker_start,omitempty"`
+	CodexPID    int       `json:"codex_pid,omitempty"`
+	CodexStart  string    `json:"codex_start,omitempty"`
+	ExitCode    *int      `json:"exit_code,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	EventsPath  string    `json:"events_path"`
+	StderrPath  string    `json:"stderr_path"`
+	ResultPath  string    `json:"result_path"`
 }
 
 func main() {
@@ -225,6 +227,7 @@ func worker(id string) error {
 	}
 	dir, _ := jobDir(id)
 	j.WorkerPID = os.Getpid()
+	j.WorkerStart = processStart(j.WorkerPID)
 	j.Status = "starting"
 	if err := writeJob(j); err != nil {
 		return err
@@ -256,6 +259,7 @@ func worker(id string) error {
 		return finishError(&j, err)
 	}
 	j.CodexPID = cmd.Process.Pid
+	j.CodexStart = processStart(j.CodexPID)
 	j.Status = "running"
 	if err := writeJob(j); err != nil {
 		syscall.Kill(-j.CodexPID, syscall.SIGTERM)
@@ -288,10 +292,28 @@ func finishError(j *Job, err error) error {
 	return err
 }
 
-func alive(pid int) bool { return pid > 0 && syscall.Kill(pid, 0) == nil }
+func processStart(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return ""
+	}
+	end := strings.LastIndexByte(string(b), ')')
+	if end < 0 {
+		return ""
+	}
+	fields := strings.Fields(string(b[end+1:]))
+	if len(fields) < 20 {
+		return ""
+	}
+	return fields[19]
+}
+
+func alive(pid int, start string) bool {
+	return pid > 0 && start != "" && processStart(pid) == start
+}
 
 func current(j Job) Job {
-	if (j.Status == "queued" || j.Status == "starting" || j.Status == "running") && j.WorkerPID != 0 && !alive(j.WorkerPID) && time.Since(j.UpdatedAt) > 5*time.Second {
+	if (j.Status == "queued" || j.Status == "starting" || j.Status == "running") && j.WorkerPID != 0 && !alive(j.WorkerPID, j.WorkerStart) && time.Since(j.UpdatedAt) > 5*time.Second {
 		j.Status = "lost"
 	}
 	return j
@@ -351,7 +373,7 @@ func stop(args []string) error {
 	if err := os.WriteFile(filepath.Join(dir, "stop"), nil, 0600); err != nil {
 		return err
 	}
-	if !alive(j.WorkerPID) || !alive(j.CodexPID) {
+	if !alive(j.WorkerPID, j.WorkerStart) || !alive(j.CodexPID, j.CodexStart) {
 		return errors.New("job process is no longer running")
 	}
 	return syscall.Kill(-j.CodexPID, syscall.SIGTERM)
