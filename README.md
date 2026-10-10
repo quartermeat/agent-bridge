@@ -22,6 +22,7 @@ The hook's `phase` and `detail` are raw reports. In particular, its “ready for
 An explicit context, session budget, credit, usage, or token rate error produces a machine-readable `halt` object with `kind`, `code`, `source`, and `detected_at`. The kinds are `context_limit`, `usage_limit`, and `rate_limit`; they are distinct because a full context window needs a new or compacted session, while account limits and temporary rate limits have different remedies. Bridge jobs end as `halted` when their failed Codex turn or fatal stderr provides that evidence. A live Claude session can expose the same field after a matching API error. Token totals alone never trigger a halt: they are not a remaining allowance. The monitor does not inspect prompts or ordinary tool output to infer one.
 
 Unacknowledged halted jobs remain in `snapshot` and appear in a prominent `watch` alert until handled. After recording how the work will continue, run `agent-bridge ack JOB_ID` to clear that alert; the job's `halt` and `acknowledged_at` remain in `list` and `show` for history. A completed job is never marked halted solely because it used many tokens.
+If a provider stops without an explicit limit error, the bridge cannot verify why; inspect that job's final result before accepting it.
 
 ## Launch Codex jobs
 

@@ -126,15 +126,20 @@ func errorFields(raw json.RawMessage) (string, string) {
 		return "", ""
 	}
 	var object struct {
-		Code    string `json:"code"`
-		Type    string `json:"type"`
-		Message string `json:"message"`
+		Code      string `json:"code"`
+		Type      string `json:"type"`
+		Message   string `json:"message"`
+		Formatted string `json:"formatted"`
 	}
 	if json.Unmarshal(raw, &object) == nil {
-		if object.Code != "" {
-			return object.Code, object.Message
+		message := object.Message
+		if object.Formatted != "" {
+			message += " " + object.Formatted
 		}
-		return object.Type, object.Message
+		if object.Code != "" {
+			return object.Code, message
+		}
+		return object.Type, message
 	}
 	var message string
 	if json.Unmarshal(raw, &message) == nil {

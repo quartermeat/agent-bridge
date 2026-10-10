@@ -25,6 +25,10 @@ func TestUsageHaltClassification(t *testing.T) {
 	if got := classifyUsageError("server_overloaded", "temporary failure", "test", at); got != nil {
 		t.Fatalf("unrelated failure classified as token halt: %+v", got)
 	}
+	code, message := errorFields([]byte(`{"formatted":"You've hit your usage limit"}`))
+	if got := classifyUsageError(code, message, "test", at); got == nil || got.Kind != "usage_limit" {
+		t.Fatalf("formatted provider error missed: %+v", got)
+	}
 }
 
 func TestWorkerRecordsHaltUntilAcknowledged(t *testing.T) {
