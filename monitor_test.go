@@ -50,6 +50,18 @@ func TestSnapshotMapsActivityToUsage(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-10-10T00-00-00-"+codexID+".jsonl"), []byte(codexRows), 0600); err != nil {
 		t.Fatal(err)
 	}
+	jobID := "test-job"
+	jobPath := filepath.Join(home, "bridge", "jobs", jobID)
+	if err := os.MkdirAll(jobPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{ID: jobID, Status: "running", CreatedAt: time.Now().UTC(), SpawnedBy: &Spawner{AgentID: fixtures[0].id, Provider: "claude", SessionID: claudeID}, EventsPath: filepath.Join(jobPath, "events.jsonl")}
+	if err := writeJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(job.EventsPath, []byte("{\"type\":\"thread.started\",\"thread_id\":\""+codexID+"\"}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	s, err := collectSnapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -62,5 +74,8 @@ func TestSnapshotMapsActivityToUsage(t *testing.T) {
 	}
 	if s.Agents[1].Provider != "codex" || s.Agents[1].Usage.Input != 20 || s.Agents[1].Usage.CacheRead != 7 || s.Agents[1].Model != "gpt-test" {
 		t.Fatalf("Codex usage: %+v", s.Agents[1])
+	}
+	if len(s.Jobs) != 1 || s.Jobs[0].SessionID != codexID || s.Agents[1].SpawnedBy == nil || s.Agents[1].SpawnedBy.AgentID != fixtures[0].id {
+		t.Fatalf("spawn relationship missing: jobs=%+v agent=%+v", s.Jobs, s.Agents[1])
 	}
 }

@@ -18,12 +18,21 @@ func TestStartAndObserve(t *testing.T) {
 		t.Fatalf("build: %v: %s", err, out)
 	}
 	fake := filepath.Join(tmp, "fake-codex")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\ncat >/dev/null\nprintf '{\"type\":\"turn.completed\"}\\n'\n"), 0700); err != nil {
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\ncat >/dev/null\nprintf '{\"type\":\"thread.started\",\"thread_id\":\"worker-session\"}\\n{\"type\":\"turn.completed\"}\\n'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	state := filepath.Join(tmp, "state")
-	start := exec.Command(bin, "start", "--cwd", tmp, "--name", "smoke")
-	start.Env = append(os.Environ(), "AGENT_BRIDGE_STATE_DIR="+state, "AGENT_BRIDGE_CODEX_BIN="+fake, "AGENT_BRIDGE_LAUNCH_MODE=direct")
+	activity := filepath.Join(tmp, "activity")
+	if err := os.Mkdir(activity, 0700); err != nil {
+		t.Fatal(err)
+	}
+	spawnerID := "claude-test-parent"
+	activityRecord, _ := json.Marshal(map[string]any{"id": spawnerID, "name": "Claude", "phase": "waiting", "sampledAt": time.Now().UTC()})
+	if err := os.WriteFile(filepath.Join(activity, spawnerID+".json"), activityRecord, 0600); err != nil {
+		t.Fatal(err)
+	}
+	start := exec.Command(bin, "start", "--cwd", tmp, "--name", "smoke", "--spawned-by", spawnerID)
+	start.Env = append(os.Environ(), "AGENT_BRIDGE_STATE_DIR="+state, "AGENT_BRIDGE_ACTIVITY_DIR="+activity, "AGENT_BRIDGE_CODEX_BIN="+fake, "AGENT_BRIDGE_LAUNCH_MODE=direct")
 	start.Stdin = strings.NewReader("Report status.")
 	out, err := start.CombinedOutput()
 	if err != nil {
@@ -39,6 +48,9 @@ func TestStartAndObserve(t *testing.T) {
 	var waited []Job
 	if err := json.Unmarshal(waitOut, &waited); err != nil || len(waited) != 1 || waited[0].Status != "completed" {
 		t.Fatalf("wait result: %v: %s", err, waitOut)
+	}
+	if waited[0].SessionID != "worker-session" || waited[0].SpawnedBy == nil || waited[0].SpawnedBy.AgentID != spawnerID || waited[0].SpawnedBy.Provider != "claude" {
+		t.Fatalf("missing worker or spawner identity: %+v", waited[0])
 	}
 	var job Job
 	deadline := time.Now().Add(5 * time.Second)

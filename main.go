@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,8 @@ import (
 type Job struct {
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
+	SpawnedBy   *Spawner    `json:"spawned_by"`
+	SessionID   string      `json:"session_id,omitempty"`
 	Cwd         string      `json:"cwd"`
 	Sandbox     string      `json:"sandbox"`
 	Launcher    string      `json:"launcher"`
@@ -34,6 +37,12 @@ type Job struct {
 	StderrPath  string      `json:"stderr_path"`
 	ResultPath  string      `json:"result_path"`
 	Usage       *TokenUsage `json:"usage,omitempty"`
+}
+
+type Spawner struct {
+	AgentID   string `json:"agent_id"`
+	Provider  string `json:"provider"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 func main() {
@@ -131,6 +140,7 @@ func start(args []string) error {
 	name := f.String("name", "", "Short job label")
 	write := f.Bool("write", false, "Allow workspace-write sandbox")
 	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
+	spawnedBy := f.String("spawned-by", "", "Agent ID from snapshot; default: detect invoking agent")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -163,6 +173,10 @@ func start(args []string) error {
 	if len(prompt) == 0 || len(prompt) > 1<<20 {
 		return errors.New("prompt must be 1 byte to 1 MiB")
 	}
+	spawner, err := resolveSpawner(*spawnedBy)
+	if err != nil {
+		return err
+	}
 	r, err := root()
 	if err != nil {
 		return err
@@ -186,7 +200,7 @@ func start(args []string) error {
 	if os.Getenv("AGENT_BRIDGE_LAUNCH_MODE") == "direct" {
 		launcher = "direct"
 	}
-	j := Job{ID: id, Name: *name, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt")}
+	j := Job{ID: id, Name: *name, SpawnedBy: spawner, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt")}
 	if err := writeJob(j); err != nil {
 		return err
 	}
@@ -315,6 +329,50 @@ func processStart(pid int) string {
 	return fields[19]
 }
 
+func processParent(pid int) int {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	end := strings.LastIndexByte(string(b), ')')
+	if end < 0 {
+		return 0
+	}
+	fields := strings.Fields(string(b[end+1:]))
+	if len(fields) < 2 {
+		return 0
+	}
+	parent, _ := strconv.Atoi(fields[1])
+	return parent
+}
+
+func resolveSpawner(explicit string) (*Spawner, error) {
+	s, err := collectSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	if explicit != "" {
+		for _, a := range s.Agents {
+			if a.ID == explicit {
+				return &Spawner{AgentID: a.ID, Provider: a.Provider, SessionID: a.SessionID}, nil
+			}
+		}
+		return nil, fmt.Errorf("spawning agent %q is not active in snapshot", explicit)
+	}
+	byPID := make(map[int]AgentUsage, len(s.Agents))
+	for _, a := range s.Agents {
+		if a.HostPID > 0 {
+			byPID[a.HostPID] = a
+		}
+	}
+	for pid, depth := os.Getppid(), 0; pid > 1 && depth < 32; pid, depth = processParent(pid), depth+1 {
+		if a, ok := byPID[pid]; ok {
+			return &Spawner{AgentID: a.ID, Provider: a.Provider, SessionID: a.SessionID}, nil
+		}
+	}
+	return nil, nil
+}
+
 func alive(pid int, start string) bool {
 	return pid > 0 && start != "" && processStart(pid) == start
 }
@@ -325,8 +383,9 @@ func current(j Job) Job {
 	}
 	_ = scanJSONLines(j.EventsPath, func(line []byte) {
 		var event struct {
-			Type  string `json:"type"`
-			Usage struct {
+			Type     string `json:"type"`
+			ThreadID string `json:"thread_id"`
+			Usage    struct {
 				Input      int64 `json:"input_tokens"`
 				Cached     int64 `json:"cached_input_tokens"`
 				CacheWrite int64 `json:"cache_write_input_tokens"`
@@ -334,7 +393,14 @@ func current(j Job) Job {
 				Reasoning  int64 `json:"reasoning_output_tokens"`
 			} `json:"usage"`
 		}
-		if json.Unmarshal(line, &event) != nil || event.Type != "turn.completed" {
+		if json.Unmarshal(line, &event) != nil {
+			return
+		}
+		if event.Type == "thread.started" {
+			j.SessionID = event.ThreadID
+			return
+		}
+		if event.Type != "turn.completed" {
 			return
 		}
 		j.Usage = &TokenUsage{Input: event.Usage.Input, CacheRead: event.Usage.Cached, CacheWrite: event.Usage.CacheWrite, Output: event.Usage.Output, Reasoning: event.Usage.Reasoning}

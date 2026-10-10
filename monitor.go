@@ -45,6 +45,7 @@ type AgentUsage struct {
 	SessionID  string       `json:"session_id,omitempty"`
 	Cwd        string       `json:"cwd,omitempty"`
 	Model      string       `json:"model,omitempty"`
+	SpawnedBy  *Spawner     `json:"spawned_by"`
 	UsageKnown bool         `json:"usage_known"`
 	Usage      TokenUsage   `json:"usage"`
 }
@@ -173,6 +174,14 @@ func collectSnapshot() (Snapshot, error) {
 	}
 	sort.Slice(s.Agents, func(i, j int) bool { return s.Agents[i].ID < s.Agents[j].ID })
 	sort.Slice(s.Jobs, func(i, j int) bool { return s.Jobs[i].CreatedAt.After(s.Jobs[j].CreatedAt) })
+	for i := range s.Agents {
+		for _, j := range s.Jobs {
+			if j.SessionID != "" && s.Agents[i].SessionID == j.SessionID && s.Agents[i].Provider == "codex" {
+				s.Agents[i].SpawnedBy = j.SpawnedBy
+				break
+			}
+		}
+	}
 	return s, nil
 }
 
@@ -397,6 +406,9 @@ func watchCommand(args []string) error {
 				fmt.Printf("  input %d (+%d)  cache read %d  cache write %d  output %d (+%d)", a.Usage.Input, inputDelta, a.Usage.CacheRead, a.Usage.CacheWrite, a.Usage.Output, outputDelta)
 			}
 			fmt.Printf("  %s", a.Detail)
+			if a.SpawnedBy != nil {
+				fmt.Printf("  spawned by %s", a.SpawnedBy.AgentID)
+			}
 			if a.Target != nil && a.Target.Name != "" {
 				fmt.Printf(" → %s", a.Target.Name)
 			}
@@ -411,6 +423,9 @@ func watchCommand(args []string) error {
 			fmt.Printf("  %-24s %-10s %s", j.ID, j.Status, j.Name)
 			if j.Usage != nil {
 				fmt.Printf("  input %d output %d", j.Usage.Input, j.Usage.Output)
+			}
+			if j.SpawnedBy != nil {
+				fmt.Printf("  spawned by %s", j.SpawnedBy.AgentID)
 			}
 			fmt.Println()
 		}
