@@ -17,14 +17,16 @@ import (
 	"time"
 )
 
-// Snapshot is deliberately provider-neutral so a future local-model/GPU sampler
-// can add another source without changing the Claude and Codex readers.
+// Snapshot combines bridge activity with machine-local GPU and model usage.
 type Snapshot struct {
-	Version   int            `json:"version"`
-	SampledAt time.Time      `json:"sampled_at"`
-	Agents    []AgentUsage   `json:"agents"`
-	Jobs      []Job          `json:"jobs"`
-	Sources   []SourceStatus `json:"sources"`
+	Version      int            `json:"version"`
+	SampledAt    time.Time      `json:"sampled_at"`
+	Agents       []AgentUsage   `json:"agents"`
+	Jobs         []Job          `json:"jobs"`
+	Sources      []SourceStatus `json:"sources"`
+	GPUs         []GPU          `json:"gpus"`
+	GPUProcesses []GPUProcess   `json:"gpu_processes"`
+	LocalModels  []LocalModel   `json:"local_models"`
 }
 
 type SourceStatus struct {
@@ -102,7 +104,7 @@ func collectSnapshot() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	now := time.Now().UTC()
-	s := Snapshot{Version: 1, SampledAt: now, Agents: []AgentUsage{}, Jobs: []Job{}, Sources: []SourceStatus{}}
+	s := Snapshot{Version: 1, SampledAt: now, Agents: []AgentUsage{}, Jobs: []Job{}, Sources: []SourceStatus{}, GPUs: []GPU{}, GPUProcesses: []GPUProcess{}, LocalModels: []LocalModel{}}
 	dir := activityDir(home)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -188,6 +190,7 @@ func collectSnapshot() (Snapshot, error) {
 		}
 		classifyAgent(&s.Agents[i], s.Jobs)
 	}
+	collectGPU(&s)
 	return s, nil
 }
 
@@ -520,6 +523,7 @@ func watchCommand(args []string) error {
 			}
 			fmt.Println()
 		}
+		renderVRAM(os.Stdout, s)
 		time.Sleep(*interval)
 	}
 }
