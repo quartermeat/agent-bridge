@@ -32,7 +32,7 @@ The coordinator rejects messages that do not parse or exceed 50 words.
 ## Commands
 
 ```bash
-agent-bridge start --cwd DIR --name NAME --prompt-file task.yaml [--write] [--spawned-by AGENT_ID]
+agent-bridge start --cwd DIR --name NAME --prompt-file task.yaml [--write] [--spawned-by AGENT_ID] [--context PATH[,PATH...]] [--context-work]
 agent-bridge ask [--provider grok|ollama] --model MODEL [--prompt-file F] [--name NAME]
 agent-bridge ask --provider ollama --list-models
 agent-bridge list | show JOB_ID | wait JOB_ID... | stop JOB_ID | ack JOB_ID
@@ -40,6 +40,7 @@ agent-bridge snapshot | latest | watch
 ```
 
 - `start` launches a Codex job in a user systemd unit. Read-only by default; `--write` allows edits in that worktree only.
+- `--context` passes selected files from the context root to a `start` job under the sharing policy; repeat it or separate paths with commas. Work-sensitive files require `--context-work`.
 - `ask` sends one prompt to Grok (xAI API key required) or a local Ollama model and prints the reply. It cannot run tools.
 - `wait` blocks until jobs finish. Coordinators wait on every job they start.
 - `ack` clears a halted job's alert after it has been resolved.

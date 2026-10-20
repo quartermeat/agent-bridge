@@ -37,6 +37,7 @@ type Job struct {
 	EventsPath     string      `json:"events_path"`
 	StderrPath     string      `json:"stderr_path"`
 	ResultPath     string      `json:"result_path"`
+	ContextFiles   []string    `json:"context_files,omitempty"`
 	Usage          *TokenUsage `json:"usage,omitempty"`
 	Halt           *Halt       `json:"halt,omitempty"`
 	AcknowledgedAt *time.Time  `json:"acknowledged_at,omitempty"`
@@ -152,6 +153,9 @@ func start(args []string) error {
 	write := f.Bool("write", false, "Allow workspace-write sandbox")
 	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
 	spawnedBy := f.String("spawned-by", "", "Agent ID from snapshot; default: detect invoking agent")
+	var contextPaths contextFlags
+	f.Var(&contextPaths, "context", "Context file or directory relative to AGENT_BRIDGE_CONTEXT_DIR (repeatable, comma-separated)")
+	contextWork := f.Bool("context-work", false, "Allow work-sensitive context selected by --context")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -184,6 +188,10 @@ func start(args []string) error {
 	if len(prompt) == 0 || len(prompt) > 1<<20 {
 		return errors.New("prompt must be 1 byte to 1 MiB")
 	}
+	selected, err := selectContext(contextPaths, *contextWork)
+	if err != nil {
+		return err
+	}
 	spawner, err := resolveSpawner(*spawnedBy)
 	if err != nil {
 		return err
@@ -200,6 +208,14 @@ func start(args []string) error {
 	if err := os.Mkdir(dir, 0700); err != nil {
 		return err
 	}
+	contextFiles, err := copyContext(dir, selected)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return err
+	}
+	if len(contextFiles) != 0 {
+		prompt = contextPrompt(prompt, dir, contextFiles)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), prompt, 0600); err != nil {
 		return err
 	}
@@ -211,7 +227,7 @@ func start(args []string) error {
 	if os.Getenv("AGENT_BRIDGE_LAUNCH_MODE") == "direct" {
 		launcher = "direct"
 	}
-	j := Job{ID: id, Name: *name, SpawnedBy: spawner, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt")}
+	j := Job{ID: id, Name: *name, SpawnedBy: spawner, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt"), ContextFiles: contextFiles}
 	if err := writeJob(j); err != nil {
 		return err
 	}

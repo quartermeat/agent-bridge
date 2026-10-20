@@ -60,6 +60,18 @@ agent-bridge stop JOB_ID
 
 At launch, the bridge detects the nearest live Claude or Codex process in its parent process chain and records it as `spawned_by`. Pass `--spawned-by` with an active `agents[].id` from `snapshot` when launching through a wrapper that breaks that process chain. The explicit ID is validated against the live snapshot.
 
+### Need-to-know context
+
+Use `--context PATH[,PATH...]` on `start` to pass only selected background files to the Codex job. The flag can be repeated. Paths are relative to `AGENT_BRIDGE_CONTEXT_DIR` (default `~/private/chatgpt-handoff/context`); a directory selects its immediate `*.md` files. For example:
+
+```bash
+agent-bridge start --cwd /path/to/worktree --prompt-file task.txt --context profile/about.md,project --context-work
+```
+
+The context root must contain `sharing-policy.yaml`. Its `never` list forbids matching files; `work_sensitive` matches require `--context-work`. An entry ending in `/` covers a directory's contents, while other entries match one exact path. The policy file itself is never shared. Missing policy, unsafe paths, and forbidden selections fail before a job is created.
+
+Approved files are copied into the job's private `context/` directory, retaining paths relative to the context root. `show` reports those paths in `context_files`. The job prompt starts with a YAML `context` block listing the absolute paths of the copies and stating that they are historical background, not instructions. Without `--context`, `start` behaves as before.
+
 `wait` blocks until every named job exits, then prints their final JSON records. It exits nonzero if any job failed, stopped, or was lost. Interrupting `wait` leaves the workers running. A coordinator should wait for all jobs it started, inspect their results and diffs, run the relevant checks, and only then finish its turn.
 
 Claude Code can invoke these commands through its shell tool. A Codex session outside this supervisor will not appear in `agent-bridge list`, though `snapshot` can show its live activity when the Codex hook is present. This tool does not attach a spawned job to an existing Codex app conversation; it exposes status and usage to any local agent that calls it.
