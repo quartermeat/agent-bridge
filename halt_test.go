@@ -31,6 +31,13 @@ func TestUsageHaltClassification(t *testing.T) {
 	}
 }
 
+func TestCodexCreditMessageKeepsUnknownScope(t *testing.T) {
+	h := classifyUsageError("usage_limit_exceeded", "You have no credits remaining", "codex_event", time.Now().UTC())
+	if h == nil || h.Kind != "usage_limit" || h.Scope != "unknown" {
+		t.Fatalf("Codex usage halt = %+v, want usage_limit/unknown", h)
+	}
+}
+
 func TestWorkerRecordsHaltUntilAcknowledged(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AGENT_BRIDGE_STATE_DIR", dir)

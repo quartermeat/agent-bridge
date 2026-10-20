@@ -19,6 +19,7 @@ import (
 type Job struct {
 	ID             string      `json:"id"`
 	Name           string      `json:"name"`
+	Provider       string      `json:"provider,omitempty"`
 	SpawnedBy      *Spawner    `json:"spawned_by"`
 	SessionID      string      `json:"session_id,omitempty"`
 	Cwd            string      `json:"cwd"`
@@ -56,11 +57,13 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|list|show|wait|ack|stop|snapshot|latest|watch|daemon|_worker")
+		return errors.New("usage: agent-bridge start|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|_worker")
 	}
 	switch args[0] {
 	case "start":
 		return start(args[1:])
+	case "ask":
+		return ask(args[1:])
 	case "list":
 		return list(args[1:])
 	case "show":
@@ -415,7 +418,7 @@ func current(j Job) Job {
 		}
 		j.Usage = &TokenUsage{Input: event.Usage.Input, CacheRead: event.Usage.Cached, CacheWrite: event.Usage.CacheWrite, Output: event.Usage.Output, Reasoning: event.Usage.Reasoning}
 	})
-	if j.Status == "failed" && j.Halt == nil {
+	if j.Status == "failed" && j.Halt == nil && j.Provider == "" {
 		code := 1
 		if j.ExitCode != nil {
 			code = *j.ExitCode

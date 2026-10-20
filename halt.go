@@ -30,7 +30,7 @@ func classifyUsageError(code, message, source string, at time.Time) *Halt {
 		kind, scope = "usage_limit", "session"
 	case "usage_limit_exceeded":
 		kind = "usage_limit"
-	case "organization_usage_limit_exceeded", "credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded", "project_spend_limit_exceeded":
+	case "organization_usage_limit_exceeded", "credit_balance_exhausted", "credits_exhausted", "insufficient_credits", "insufficient_quota", "billing_hard_limit_reached", "organization_spend_limit_exceeded", "project_spend_limit_exceeded":
 		kind, scope = "usage_limit", "account"
 	case "rate_limit_exceeded", "tokens_per_minute_exceeded":
 		kind, scope = "rate_limit", "temporary"

@@ -61,3 +61,25 @@ At launch, the bridge detects the nearest live Claude or Codex process in its pa
 `wait` blocks until every named job exits, then prints their final JSON records. It exits nonzero if any job failed, stopped, or was lost. Interrupting `wait` leaves the workers running. A coordinator should wait for all jobs it started, inspect their results and diffs, run the relevant checks, and only then finish its turn.
 
 Claude Code can invoke these commands through its shell tool. A Codex session outside this supervisor will not appear in `agent-bridge list`, though `snapshot` can show its live activity when the Codex hook is present. This tool does not attach a spawned job to an existing Codex app conversation; it exposes status and usage to any local agent that calls it.
+
+## Ask Grok
+
+`agent-bridge ask` sends one text prompt to xAI's API and prints the assistant's reply. It runs synchronously and records a Grok job under the same jobs directory used by `list`, `show`, `wait`, and `snapshot`. It does not run tools.
+
+Get an API key from [console.x.ai](https://console.x.ai). Set `XAI_API_KEY`, or save the key in `~/.config/agent-bridge/xai-api-key` and restrict that file to your user:
+
+```bash
+install -d -m 700 ~/.config/agent-bridge
+chmod 600 ~/.config/agent-bridge/xai-api-key
+```
+
+Check available models before choosing one. xAI trial or free credits are not guaranteed; check the current credit balance and terms at [console.x.ai](https://console.x.ai).
+
+```bash
+agent-bridge ask --list-models
+printf 'Explain this error.' | agent-bridge ask --model MODEL_ID --name quick-question
+agent-bridge ask --model MODEL_ID --system 'Be concise.' --prompt-file question.txt
+AGENT_BRIDGE_GROK_MODEL=MODEL_ID agent-bridge ask --timeout 60s < question.txt
+```
+
+`--model` overrides `AGENT_BRIDGE_GROK_MODEL`. One of them is required for a prompt; there is no built-in model default. The default timeout is 120 seconds. Pass `--spawned-by AGENT_ID` to associate the job with a live parent agent when automatic detection cannot find it. For local testing, `AGENT_BRIDGE_XAI_BASE_URL` overrides the default `https://api.x.ai/v1` endpoint.
