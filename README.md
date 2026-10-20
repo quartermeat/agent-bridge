@@ -62,9 +62,11 @@ At launch, the bridge detects the nearest live Claude or Codex process in its pa
 
 Claude Code can invoke these commands through its shell tool. A Codex session outside this supervisor will not appear in `agent-bridge list`, though `snapshot` can show its live activity when the Codex hook is present. This tool does not attach a spawned job to an existing Codex app conversation; it exposes status and usage to any local agent that calls it.
 
-## Ask Grok
+## Ask a model
 
-`agent-bridge ask` sends one text prompt to xAI's API and prints the assistant's reply. It runs synchronously and records a Grok job under the same jobs directory used by `list`, `show`, `wait`, and `snapshot`. It does not run tools.
+`agent-bridge ask` sends one text prompt to Grok or a local Ollama model and prints the assistant's reply. It runs synchronously and records a job under the same jobs directory used by `list`, `show`, `wait`, and `snapshot`. It does not run tools. Grok is the default provider, so existing commands work unchanged.
+
+### Grok
 
 Get an API key from [console.x.ai](https://console.x.ai). Set `XAI_API_KEY`, or save the key in `~/.config/agent-bridge/xai-api-key` and restrict that file to your user:
 
@@ -83,3 +85,16 @@ AGENT_BRIDGE_GROK_MODEL=MODEL_ID agent-bridge ask --timeout 60s < question.txt
 ```
 
 `--model` overrides `AGENT_BRIDGE_GROK_MODEL`. One of them is required for a prompt; there is no built-in model default. The default timeout is 120 seconds. Pass `--spawned-by AGENT_ID` to associate the job with a live parent agent when automatic detection cannot find it. For local testing, `AGENT_BRIDGE_XAI_BASE_URL` overrides the default `https://api.x.ai/v1` endpoint.
+
+### Ollama
+
+Start the local server with `ollama serve`, then list installed models or pull one with `ollama pull MODEL_ID`. Ollama needs no API key.
+
+```bash
+agent-bridge ask --provider ollama --list-models
+printf 'Explain this error.' | agent-bridge ask --provider ollama --model MODEL_ID --name quick-question
+agent-bridge ask --provider ollama --model MODEL_ID --system 'Be concise.' --prompt-file question.txt
+AGENT_BRIDGE_OLLAMA_MODEL=MODEL_ID agent-bridge ask --provider ollama < question.txt
+```
+
+`--model` overrides `AGENT_BRIDGE_OLLAMA_MODEL`. One of them is required for a prompt; there is no built-in model default. `OLLAMA_HOST` accepts `host:port` or a full HTTP(S) URL and defaults to `http://127.0.0.1:11434`. The Ollama timeout is 600 seconds to allow models to load; `--timeout` overrides either provider's default. Ollama jobs keep the same private result file and metadata-only events, and support `--spawned-by` as Grok jobs do.

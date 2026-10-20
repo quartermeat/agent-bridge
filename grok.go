@@ -20,39 +20,74 @@ var grokHTTPClient = &http.Client{}
 
 func ask(args []string) error {
 	f := flag.NewFlagSet("ask", flag.ContinueOnError)
-	model := f.String("model", "", "xAI model ID")
+	provider := f.String("provider", "grok", "Model provider: grok or ollama")
+	model := f.String("model", "", "Model ID")
 	system := f.String("system", "", "System instructions")
 	name := f.String("name", "", "Short job label")
 	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
-	listModels := f.Bool("list-models", false, "List available xAI model IDs")
+	listModels := f.Bool("list-models", false, "List available model IDs")
 	spawnedBy := f.String("spawned-by", "", "Agent ID from snapshot; default: detect invoking agent")
-	timeout := f.Duration("timeout", 120*time.Second, "Request timeout")
+	timeout := f.Duration("timeout", 0, "Request timeout (default: 120s for Grok, 600s for Ollama)")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
 	if f.NArg() != 0 {
 		return errors.New("pass prompt on stdin or with --prompt-file")
 	}
+	if *provider != "grok" && *provider != "ollama" {
+		return fmt.Errorf("unknown provider %q; choose grok or ollama", *provider)
+	}
+	timeoutSet := false
+	f.Visit(func(opt *flag.Flag) {
+		if opt.Name == "timeout" {
+			timeoutSet = true
+		}
+	})
+	if !timeoutSet {
+		*timeout = 120 * time.Second
+		if *provider == "ollama" {
+			*timeout = 600 * time.Second
+		}
+	}
 	if *timeout <= 0 {
 		return errors.New("--timeout must be positive")
 	}
 	if !*listModels && *model == "" {
-		*model = os.Getenv("AGENT_BRIDGE_GROK_MODEL")
+		env := "AGENT_BRIDGE_GROK_MODEL"
+		if *provider == "ollama" {
+			env = "AGENT_BRIDGE_OLLAMA_MODEL"
+		}
+		*model = os.Getenv(env)
 	}
 	if !*listModels && strings.TrimSpace(*model) == "" {
+		if *provider == "ollama" {
+			return errors.New("no Ollama model selected; run agent-bridge ask --provider ollama --list-models and pass --model")
+		}
 		return errors.New("no Grok model selected; run agent-bridge ask --list-models and pass --model")
 	}
-	key, err := grokAPIKey()
-	if err != nil {
-		return err
-	}
-	base := strings.TrimRight(os.Getenv("AGENT_BRIDGE_XAI_BASE_URL"), "/")
-	if base == "" {
-		base = "https://api.x.ai/v1"
+	var key, base string
+	var err error
+	if *provider == "grok" {
+		key, err = grokAPIKey()
+		if err != nil {
+			return err
+		}
+		base = strings.TrimRight(os.Getenv("AGENT_BRIDGE_XAI_BASE_URL"), "/")
+		if base == "" {
+			base = "https://api.x.ai/v1"
+		}
+	} else {
+		base, err = ollamaBase()
+		if err != nil {
+			return err
+		}
 	}
 	if *listModels {
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		defer cancel()
+		if *provider == "ollama" {
+			return ollamaListModels(ctx, base)
+		}
 		return grokListModels(ctx, base, key)
 	}
 	var prompt []byte
@@ -90,7 +125,7 @@ func ask(args []string) error {
 	if err := os.Mkdir(dir, 0700); err != nil {
 		return err
 	}
-	j := Job{ID: id, Name: *name, Provider: "grok", SpawnedBy: spawner, Cwd: cwd, Sandbox: "none", Launcher: "inline", Status: "running", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt")}
+	j := Job{ID: id, Name: *name, Provider: *provider, SpawnedBy: spawner, Cwd: cwd, Sandbox: "none", Launcher: "inline", Status: "running", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt")}
 	if err := writeJob(j); err != nil {
 		return err
 	}
@@ -107,7 +142,16 @@ func ask(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	result, usage, status, code, halt, err := grokCompletion(ctx, base, key, *model, *system, string(prompt))
+	var result string
+	var usage TokenUsage
+	var status int
+	var code string
+	var halt *Halt
+	if *provider == "ollama" {
+		result, usage, status, code, err = ollamaCompletion(ctx, base, *model, *system, string(prompt))
+	} else {
+		result, usage, status, code, halt, err = grokCompletion(ctx, base, key, *model, *system, string(prompt))
+	}
 	if err != nil {
 		if eventErr := writeEvent(map[string]any{"type": "error", "http_status": status, "code": code}); eventErr != nil {
 			return finishError(&j, eventErr)
