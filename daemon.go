@@ -97,6 +97,10 @@ func daemonCommand(args []string) error {
 }
 
 func runDaemon(ctx context.Context, interval time.Duration) error {
+	feed, err := loadTokenFeed()
+	if err != nil {
+		return err
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -105,6 +109,10 @@ func runDaemon(ctx context.Context, interval time.Duration) error {
 			return err
 		}
 		if err := publishSnapshot(s); err != nil {
+			return err
+		}
+		feed.addSnapshot(s)
+		if err := feed.publish(s.SampledAt); err != nil {
 			return err
 		}
 		select {
