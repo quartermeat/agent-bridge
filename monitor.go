@@ -41,6 +41,7 @@ type AgentUsage struct {
 	Name          string       `json:"name"`
 	Phase         string       `json:"phase"`
 	Detail        string       `json:"detail,omitempty"`
+	ReportOrigin  string       `json:"report_origin,omitempty"`
 	ActivityState string       `json:"activity_state"`
 	StateDetail   string       `json:"state_detail"`
 	ActiveJobIDs  []string     `json:"active_job_ids"`
@@ -71,12 +72,13 @@ type TokenUsage struct {
 }
 
 type activityFile struct {
-	ID        string       `json:"id"`
-	Name      string       `json:"name"`
-	Phase     string       `json:"phase"`
-	Detail    string       `json:"detail"`
-	Target    *AgentTarget `json:"target"`
-	SampledAt time.Time    `json:"sampledAt"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	Phase        string       `json:"phase"`
+	Detail       string       `json:"detail"`
+	ReportOrigin string       `json:"report_origin"`
+	Target       *AgentTarget `json:"target"`
+	SampledAt    time.Time    `json:"sampledAt"`
 }
 
 func monitorHome() (string, error) {
@@ -136,7 +138,7 @@ func collectSnapshot() (Snapshot, error) {
 			default:
 				continue
 			}
-			s.Agents = append(s.Agents, AgentUsage{ID: a.ID, Provider: provider, Name: a.Name, Phase: a.Phase, Detail: a.Detail, Target: a.Target, HostPID: hostPID, SampledAt: a.SampledAt})
+			s.Agents = append(s.Agents, AgentUsage{ID: a.ID, Provider: provider, Name: a.Name, Phase: a.Phase, Detail: a.Detail, ReportOrigin: a.ReportOrigin, Target: a.Target, HostPID: hostPID, SampledAt: a.SampledAt})
 		}
 	}
 	for i := range s.Agents {
@@ -231,6 +233,8 @@ func classifyAgent(a *AgentUsage, jobs []Job) {
 		a.StateDetail = fmt.Sprintf("%d spawned bridge job(s) still running", len(a.ActiveJobIDs))
 	case len(a.HaltedJobIDs) > 0 && (a.Phase == "waiting" || a.Phase == "idle"):
 		a.ActivityState, a.StateDetail = "halted_usage", "spawned job halted by token or usage limit"
+	case a.ReportOrigin == "event" && ((a.Phase == "waiting" && a.Detail == "ready for direction") || (a.Phase == "idle" && a.Detail == "session ready")):
+		a.ActivityState, a.StateDetail = "ready", "turn completed; waiting for direction"
 	default:
 		a.ActivityState, a.StateDetail = "unverified", "hook is quiet; readiness unverified"
 	}
@@ -244,7 +248,12 @@ func activityCurrent(path string, a activityFile, now time.Time) (int, bool) {
 			return 0, false
 		}
 	case "idle", "waiting", "error":
-		// These phases describe a state; the hook leaves the timestamp alone.
+		// A watcher tracks its host process, which may serve several sessions.
+		// An old session must not remain visible indefinitely just because that
+		// shared process is still alive.
+		if age > time.Hour {
+			return 0, false
+		}
 	default:
 		return 0, false
 	}

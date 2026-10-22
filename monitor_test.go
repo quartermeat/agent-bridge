@@ -89,6 +89,16 @@ func TestQuietHookDoesNotClaimReadiness(t *testing.T) {
 	if a.ActivityState != "unverified" || a.StateDetail == "ready for direction" {
 		t.Fatalf("quiet hook claimed readiness: %+v", a)
 	}
+	a.ReportOrigin = "watchdog"
+	classifyAgent(&a, nil)
+	if a.ActivityState != "unverified" {
+		t.Fatalf("watchdog claimed readiness: %+v", a)
+	}
+	a.ReportOrigin = "event"
+	classifyAgent(&a, nil)
+	if a.ActivityState != "ready" {
+		t.Fatalf("completed turn was not ready: %+v", a)
+	}
 	a = AgentUsage{ID: "codex-worker", Provider: "codex", SessionID: "worker-session", Phase: "waiting", Detail: "approval requested for Bash"}
 	classifyAgent(&a, []Job{{ID: "job", SessionID: "worker-session", Status: "running"}})
 	if a.ActivityState != "approval_required" || len(a.ActiveJobIDs) != 1 {
@@ -98,6 +108,16 @@ func TestQuietHookDoesNotClaimReadiness(t *testing.T) {
 	classifyAgent(&a, nil)
 	if a.ActivityState != "halted_usage" {
 		t.Fatalf("usage halt hidden by quiet hook: %+v", a)
+	}
+}
+
+func TestOldWaitingReportIsNotCurrent(t *testing.T) {
+	now := time.Now().UTC()
+	_, current := activityCurrent(filepath.Join(t.TempDir(), "session.json"), activityFile{
+		Phase: "waiting", SampledAt: now.Add(-2 * time.Hour),
+	}, now)
+	if current {
+		t.Fatal("old waiting report remained visible")
 	}
 }
 
