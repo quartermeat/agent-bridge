@@ -19,14 +19,16 @@ import (
 
 // Snapshot combines bridge activity with machine-local GPU and model usage.
 type Snapshot struct {
-	Version      int            `json:"version"`
-	SampledAt    time.Time      `json:"sampled_at"`
-	Agents       []AgentUsage   `json:"agents"`
-	Jobs         []Job          `json:"jobs"`
-	Sources      []SourceStatus `json:"sources"`
-	GPUs         []GPU          `json:"gpus"`
-	GPUProcesses []GPUProcess   `json:"gpu_processes"`
-	LocalModels  []LocalModel   `json:"local_models"`
+	Version       int                `json:"version"`
+	SampledAt     time.Time          `json:"sampled_at"`
+	Agents        []AgentUsage       `json:"agents"`
+	Jobs          []Job              `json:"jobs"`
+	Sources       []SourceStatus     `json:"sources"`
+	GPUs          []GPU              `json:"gpus"`
+	GPUProcesses  []GPUProcess       `json:"gpu_processes"`
+	LocalModels   []LocalModel       `json:"local_models"`
+	Steinberger   *SteinbergerStatus `json:"steinberger,omitempty"`
+	RepoAttention *RepoAttentionFeed `json:"repo_attention,omitempty"`
 }
 
 type SourceStatus struct {
@@ -193,6 +195,18 @@ func collectSnapshot() (Snapshot, error) {
 		classifyAgent(&s.Agents[i], s.Jobs)
 	}
 	collectGPU(&s)
+	if status, err := cachedSteinberger(now); err == nil {
+		s.Steinberger = &status
+		s.Sources = append(s.Sources, SourceStatus{Name: "steinberger", Available: true})
+	} else {
+		s.Sources = append(s.Sources, SourceStatus{Name: "steinberger", Detail: err.Error()})
+	}
+	if feed, err := readRepoAttentionFeed(home, now); err == nil {
+		s.RepoAttention = &feed
+		s.Sources = append(s.Sources, SourceStatus{Name: "repo-attention-feed", Available: true})
+	} else {
+		s.Sources = append(s.Sources, SourceStatus{Name: "repo-attention-feed", Detail: err.Error()})
+	}
 	return s, nil
 }
 
@@ -473,6 +487,9 @@ func watchCommand(args []string) error {
 		}
 		fmt.Print("\x1b[H\x1b[2J")
 		fmt.Printf("Claude / Codex activity — %s UTC (%s; Ctrl-C to exit)\n\n", s.SampledAt.Format("15:04:05"), origin)
+		if s.Steinberger != nil && s.Steinberger.Health != "healthy" {
+			fmt.Printf("*** STEINBERGER UNHEALTHY: %s ***\n", s.Steinberger.Reason)
+		}
 		for _, a := range s.Agents {
 			if a.Halt != nil {
 				fmt.Printf("*** %s HALTED: %s (%s) ***\n", a.Name, haltLabel(a.Halt), a.Halt.Code)
@@ -531,6 +548,27 @@ func watchCommand(args []string) error {
 				fmt.Printf("  %s", haltLabel(j.Halt))
 			}
 			fmt.Println()
+		}
+		fmt.Println("\nSteinberger:")
+		if s.Steinberger == nil {
+			fmt.Println("  status unavailable")
+		} else {
+			fmt.Printf("  %s  scan timer %s  watchdog timer %s  scan result %s\n", s.Steinberger.Health, s.Steinberger.ScanTimer, s.Steinberger.WatchdogTimer, s.Steinberger.ScanResult)
+			if !s.Steinberger.LastSuccess.IsZero() {
+				fmt.Printf("  last successful scan %s ago\n", s.SampledAt.Sub(s.Steinberger.LastSuccess).Round(time.Second))
+			}
+		}
+		if s.RepoAttention == nil {
+			fmt.Println("  repository activity feed unavailable")
+		} else {
+			fmt.Printf("  %d repositories; feed sampled %s ago\n", s.RepoAttention.Repositories, s.SampledAt.Sub(s.RepoAttention.SampledAt).Round(time.Second))
+			fmt.Println("  recent commits:")
+			if len(s.RepoAttention.Commits) == 0 {
+				fmt.Println("    none in the last seven days")
+			}
+			for _, commit := range s.RepoAttention.Commits {
+				fmt.Printf("    %-22s %.7s  %s  (%s ago)\n", filepath.Base(commit.Repo), commit.Hash, commit.Subject, s.SampledAt.Sub(commit.CommittedAt).Round(time.Minute))
+			}
 		}
 		renderVRAM(os.Stdout, s)
 		time.Sleep(*interval)

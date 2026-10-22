@@ -52,6 +52,7 @@ The `agent-bridge-monitor` user service samples every two seconds to `~/.local/s
 - agents and jobs, with `activity_state` and token usage;
 - halts (`usage_limit`, `rate_limit`, `context_limit`) with scope;
 - GPU VRAM, top VRAM processes, and loaded Ollama models.
+- Steinberger timer health and recent commits from repo-attention's small feed.
 
 `watch` shows the same view live and turns red at 90% VRAM. The token feed is at `~/.local/state/agent-bridge/token-feed.tsv`.
 

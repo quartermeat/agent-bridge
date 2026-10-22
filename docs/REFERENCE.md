@@ -113,6 +113,19 @@ AGENT_BRIDGE_OLLAMA_MODEL=MODEL_ID agent-bridge ask --provider ollama < question
 
 `--model` overrides `AGENT_BRIDGE_OLLAMA_MODEL`. One of them is required for a prompt; there is no built-in model default. `OLLAMA_HOST` accepts `host:port` or a full HTTP(S) URL and defaults to `http://127.0.0.1:11434`. The Ollama timeout is 600 seconds to allow models to load; `--timeout` overrides either provider's default. Ollama jobs keep the same private result file and metadata-only events, and support `--spawned-by` as Grok jobs do.
 
+## Steinberger and repository activity
+
+`snapshot`, `latest`, and `watch` report the Steinberger scan timer, watchdog
+timer, last scan result, and age of the last successful scan. A scan older than
+15 minutes or an inactive timer is shown as unhealthy. The daemon checks systemd
+every 30 seconds; the viewer places an unhealthy alert above the agent list.
+
+The viewer also reads repo-attention's private `activity-feed.json` after each
+five-minute scan. It displays recent commits and exposes the feed, including
+active repositories, in `repo_attention`. Missing or stale feeds are shown in
+`sources`, independently from timer health. This avoids rereading repo-attention's
+large line-hash state or running Git for every viewer refresh.
+
 ## GPU and local models
 
 `snapshot` and the daemon's `latest` sample include NVIDIA GPU memory usage, total memory, utilization, compute-process VRAM, and loaded Ollama models when those sources are available. `watch` shows a VRAM section and highlights GPUs at 90% memory use. The `sources` entries named `nvidia-smi` and `ollama` explain unavailable data. GPU sampling requires `nvidia-smi`; Ollama sampling uses `OLLAMA_HOST` or `http://127.0.0.1:11434`. Neither service is required for the other snapshot data.
