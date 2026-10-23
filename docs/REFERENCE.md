@@ -8,6 +8,7 @@ Launch observable Codex CLI jobs from Claude Code or any shell. Jobs run in sepa
 agent-bridge snapshot                 # one machine-readable JSON sample
 agent-bridge latest                   # most recent daemon sample; fails if stale
 agent-bridge watch --interval 2s      # live terminal view; Ctrl-C to exit
+agent-bridge speak --text 'Agent bridge is ready.'
 ```
 
 ## Background monitor
@@ -22,6 +23,15 @@ systemctl --user enable --now agent-bridge-monitor.service
 ```
 
 The daemon starts under the user systemd manager and refreshes `~/.local/state/agent-bridge/latest.json` every two seconds. It writes the file atomically with user-only permissions. Other monitors can read that file or call `agent-bridge latest`; `latest` exits nonzero if the sample is older than ten seconds. `snapshot` always collects a fresh sample. `watch` uses the daemon's sample when available and falls back to direct sampling otherwise. Closing the viewer window does not stop the daemon.
+
+`speak` provides local one-way audio output. It reads text from `--text` or stdin,
+uses FFmpeg's Flite filter, and plays through `paplay` on the current default
+PulseAudio/PipeWire sink. Installations need `ffmpeg` with Flite support and
+`paplay` available on `PATH`. The default voice is `slt`; `--voice` also accepts
+`awb`, `kal`, `kal16`, and `rms`. Input is limited to 4096 bytes. Text and WAV
+files are private temporary files deleted when playback finishes or fails. The
+command does not send speech text to a network service or read replies aloud
+automatically.
 
 The same daemon publishes `~/.local/state/agent-bridge/token-feed.tsv` for the Orbital Drift sand table. Its first lines are a version marker, `sampled_at`, and cumulative `claude` and `codex` token totals. Session cursor rows follow so restarting the daemon does not count a session twice. Totals include input (including cached reads) and output tokens; cache components are not added again. The file is atomically replaced and readable only by this user. A sand table starting mid-session treats the first values as its baseline and adds grains only for later increases.
 

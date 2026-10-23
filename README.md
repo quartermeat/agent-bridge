@@ -37,6 +37,7 @@ agent-bridge ask [--provider grok|ollama] --model MODEL [--prompt-file F] [--nam
 agent-bridge ask --provider ollama --list-models
 agent-bridge list | show JOB_ID | wait JOB_ID... | stop JOB_ID | ack JOB_ID
 agent-bridge snapshot | latest | watch
+agent-bridge speak --text 'Agent bridge is ready.'
 ```
 
 - `start` launches a Codex job in a user systemd unit. Read-only by default; `--write` allows edits in that worktree only.
@@ -44,6 +45,7 @@ agent-bridge snapshot | latest | watch
 - `ask` sends one prompt to Grok (xAI API key required) or a local Ollama model and prints the reply. It cannot run tools.
 - `wait` blocks until jobs finish. Coordinators wait on every job they start.
 - `ack` clears a halted job's alert after it has been resolved.
+- `speak` reads `--text` or stdin, synthesizes speech locally with FFmpeg's Flite filter, and plays it through the default PulseAudio/PipeWire sink with `paplay`. It sends no text to a remote service. Use `--voice awb|kal|kal16|rms|slt` to choose a voice (default `slt`). Temporary text and audio files are private and removed after playback. This command speaks when invoked; it does not automatically read agent replies or monitor events.
 
 ## Monitoring
 
