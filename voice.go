@@ -413,18 +413,27 @@ func stripWakeWord(transcript, wake string) (string, bool) {
 	if wake == "" {
 		return transcript, true
 	}
-	clean := strings.TrimLeftFunc(transcript, func(r rune) bool { return unicode.IsPunct(r) || unicode.IsSpace(r) })
-	if len(clean) < len(wake) || !strings.EqualFold(clean[:len(wake)], wake) {
-		return "", false
-	}
-	remainder := clean[len(wake):]
-	if len(remainder) > 0 {
-		r, _ := utf8.DecodeRuneInString(remainder)
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+	separator := func(r rune) bool { return unicode.IsPunct(r) || unicode.IsSpace(r) }
+	remainder := strings.TrimLeftFunc(transcript, separator)
+	words := strings.Fields(wake)
+	for i, word := range words {
+		if len(remainder) < len(word) || !strings.EqualFold(remainder[:len(word)], word) {
 			return "", false
 		}
+		remainder = remainder[len(word):]
+		if remainder != "" {
+			r, _ := utf8.DecodeRuneInString(remainder)
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+				return "", false
+			}
+		}
+		clean := strings.TrimLeftFunc(remainder, separator)
+		if i < len(words)-1 && clean == remainder {
+			return "", false
+		}
+		remainder = clean
 	}
-	return strings.TrimLeftFunc(remainder, func(r rune) bool { return unicode.IsPunct(r) || unicode.IsSpace(r) }), true
+	return remainder, true
 }
 
 func transcribeVoice(ctx context.Context, path string) (string, error) {

@@ -62,6 +62,47 @@ func TestVoiceWakeGate(t *testing.T) {
 		t.Fatal(heard)
 	}
 }
+func TestStripWakeWord(t *testing.T) {
+	tests := []struct {
+		name, transcript, wake, prompt string
+		match                          bool
+	}{
+		{"plain", "Hey agent what time is it?", "hey agent", "what time is it?", true},
+		{"punctuation inside", "Hey, agent, what time is it?", "hey agent", "what time is it?", true},
+		{"extra space", "  Hey,   agent:  what time is it?  ", "hey agent", "what time is it?", true},
+		{"punctuation separator", "Hey—agent! what time is it?", "hey agent", "what time is it?", true},
+		{"leading punctuation", "...Hey, agent, what time is it?", "hey agent", "what time is it?", true},
+		{"wake only", "Hey, agent!", "hey agent", "", true},
+		{"leading word", "Oh, hey agent, what time is it?", "hey agent", "", false},
+		{"partial first word", "Heyday agent, what time is it?", "hey agent", "", false},
+		{"partial last word", "Hey, agency, what time is it?", "hey agent", "", false},
+		{"underscore suffix", "Hey, agent_name, what time is it?", "hey agent", "", false},
+		{"missing word", "Hey, what time is it?", "hey agent", "", false},
+		{"empty wake", "  Hey, agent, what time is it?  ", "", "Hey, agent, what time is it?", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prompt, match := stripWakeWord(tt.transcript, tt.wake)
+			if prompt != tt.prompt || match != tt.match {
+				t.Fatalf("stripWakeWord() = %q, %t; want %q, %t", prompt, match, tt.prompt, tt.match)
+			}
+		})
+	}
+}
+
+func TestVoiceQuietSpeechThreshold(t *testing.T) {
+	input := append(testVoicePCM(66, 10), testVoicePCM(328, 4)...)
+	input = append(input, testVoicePCM(66, 35)...)
+	triggered := 0
+	pcm, err := readVoiceUtteranceObserved(context.Background(), bytes.NewReader(input), 0.006, func(_ float64, trigger bool) {
+		if trigger {
+			triggered++
+		}
+	})
+	if err != nil || triggered != 1 || len(pcm) == 0 {
+		t.Fatalf("quiet speech: %d bytes, %v, triggers=%d", len(pcm), err, triggered)
+	}
+}
 func TestVoicePrivateAudioAndNoSpeechLogs(t *testing.T) {
 	var path string
 	var logs []string

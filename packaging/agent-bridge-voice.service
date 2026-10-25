@@ -7,7 +7,9 @@ After=graphical-session.target pipewire.service pipewire-pulse.service
 Type=simple
 WorkingDirectory=%h
 # Voice requests have read-only Codex access. Journal RMS readings help tune --vad-threshold.
-ExecStart=%h/.local/bin/agent-bridge voice --source alsa_input.pci-0000_28_00.4.analog-stereo --wake-word "hey agent" --vad-threshold 0.08
+# Select Starship Rear Mic before capture; its ALSA mux can otherwise remain on Line.
+ExecStartPre=/usr/bin/amixer -c Generic sset "Input Source,0" "Rear Mic"
+ExecStart=%h/.local/bin/agent-bridge voice --source alsa_input.pci-0000_28_00.4.analog-stereo --wake-word "hey agent" --vad-threshold 0.03
 Restart=on-failure
 RestartSec=5s
 UMask=0077
