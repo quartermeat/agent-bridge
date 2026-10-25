@@ -83,6 +83,13 @@ func TestStripWakeWord(t *testing.T) {
 		{"plural variant", "Hey agents. What time is it?", "hey agent", "What time is it?", true},
 		{"hi variant only for default", "Hi computer, go", "hey computer", "", false},
 		{"no loose variant", "A agent, what time is it?", "hey agent", "", false},
+		{"bare agent variant", "Agent, testing", "hey agent", "testing", true},
+		{"bare agent clipped hey", "Agent Testing.", "hey agent", "Testing.", true},
+		{"bare agent only", "Agent.", "hey agent", "", true},
+		{"agent not first word", "the agent is here", "hey agent", "", false},
+		{"agent prefix word", "Agents, go", "hey agent", "", false},
+		{"agency", "Agency testing", "hey agent", "", false},
+		{"bare variant only for default", "Computer, go", "hey computer", "", false},
 		{"empty wake", "  Hey, agent, what time is it?  ", "", "Hey, agent, what time is it?", true},
 	}
 	for _, tt := range tests {
@@ -333,6 +340,9 @@ func TestVoiceDiagnosticClassification(t *testing.T) {
 }
 
 func TestVoiceUtteranceCapIncludesPreroll(t *testing.T) {
+	if got := voicePrerollFrames * voiceFrameDuration; got != 600*time.Millisecond {
+		t.Fatalf("pre-roll %v; want 600ms", got)
+	}
 	limit := 2 * time.Second
 	// Minutes of silence must not grow the pre-roll past its ring size.
 	input := append(testVoicePCM(0, 6000), testVoicePCM(4000, 400)...)
@@ -602,6 +612,12 @@ func TestVoiceBareWakeOpensWindow(t *testing.T) {
 	h.say(t, cfg, "Hi agent, um.")
 	if len(h.prompts) != 0 || h.state.until.IsZero() {
 		t.Fatal("wake plus filler did not open the window")
+	}
+	// A clipped "hey" leaves a bare "Agent." which is still a bare wake.
+	h = newVoiceFollowUpHarness()
+	h.say(t, cfg, "Agent.")
+	if len(h.prompts) != 0 || h.state.until.IsZero() || strings.Join(h.spoken, "|") != "I'm listening." {
+		t.Fatalf("bare Agent.: prompts=%v spoken=%v", h.prompts, h.spoken)
 	}
 }
 

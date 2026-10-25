@@ -26,7 +26,7 @@ const (
 	voiceRate           = 16000
 	voiceFrameSamples   = 320
 	voiceFrameDuration  = 20 * time.Millisecond
-	voicePrerollFrames  = 10
+	voicePrerollFrames  = 30 // 600 ms keeps a soft leading "hey" before the 3-frame trigger
 	voiceMaxDuration    = 30 * time.Second
 	voiceMinUtterance   = 2 * time.Second
 	voiceMaxUtterance   = 60 * time.Second
@@ -705,7 +705,9 @@ func voiceReplyChunks(reply string) []string {
 }
 
 // voiceWakeVariants are conservative Whisper mishearings accepted for the default wake phrase.
-var voiceWakeVariants = map[string][]string{"hey agent": {"hi agent", "hey agents"}}
+// Every variant matches only at the start of the transcript, so a bare "agent" accepts
+// "Agent, testing" (a clipped "hey") but never "the agent is".
+var voiceWakeVariants = map[string][]string{"hey agent": {"hi agent", "hey agents", "agent"}}
 
 // stripWakeWord removes a leading wake phrase (or one of its known variants) and
 // reports whether it matched. Case and surrounding punctuation are ignored.
