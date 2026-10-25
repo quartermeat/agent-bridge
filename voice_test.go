@@ -78,6 +78,11 @@ func TestStripWakeWord(t *testing.T) {
 		{"partial last word", "Hey, agency, what time is it?", "hey agent", "", false},
 		{"underscore suffix", "Hey, agent_name, what time is it?", "hey agent", "", false},
 		{"missing word", "Hey, what time is it?", "hey agent", "", false},
+		{"wake trailing period", "Hey agent.", "hey agent", "", true},
+		{"hi variant", "Hi agent, what time is it?", "hey agent", "what time is it?", true},
+		{"plural variant", "Hey agents. What time is it?", "hey agent", "What time is it?", true},
+		{"hi variant only for default", "Hi computer, go", "hey computer", "", false},
+		{"no loose variant", "A agent, what time is it?", "hey agent", "", false},
 		{"empty wake", "  Hey, agent, what time is it?  ", "", "Hey, agent, what time is it?", true},
 	}
 	for _, tt := range tests {
@@ -568,5 +573,68 @@ func TestVoiceToneWAVAndPlayerFile(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
 		t.Fatal("tone directory not removed")
+	}
+}
+
+func TestVoiceBareWakeOpensWindow(t *testing.T) {
+	cfg := voiceConfig{wakeWord: "hey agent", followUp: 20 * time.Second}
+	h := newVoiceFollowUpHarness()
+	h.say(t, cfg, "Hey agent.")
+	if len(h.prompts) != 0 || h.state.until.IsZero() {
+		t.Fatalf("bare wake: prompts=%v until=%v", h.prompts, h.state.until)
+	}
+	if got := strings.Join(h.spoken, "|"); got != "I'm listening." {
+		t.Fatal(got)
+	}
+	if !strings.Contains(strings.Join(h.logs, "|"), "voice wake only; listening") {
+		t.Fatal(h.logs)
+	}
+	h.now = h.now.Add(5 * time.Second)
+	h.say(t, cfg, "what time is it")
+	if len(h.prompts) != 1 || h.prompts[0] != "what time is it" || h.tones != 1 {
+		t.Fatalf("request after bare wake: %v tones=%d", h.prompts, h.tones)
+	}
+	if got := strings.Join(h.spoken, "|"); got != "I'm listening.|answer" {
+		t.Fatalf("second acknowledgement: %s", got)
+	}
+	// Filler after the wake phrase still counts as a bare wake.
+	h = newVoiceFollowUpHarness()
+	h.say(t, cfg, "Hi agent, um.")
+	if len(h.prompts) != 0 || h.state.until.IsZero() {
+		t.Fatal("wake plus filler did not open the window")
+	}
+}
+
+func TestVoiceBareWakeWindowExpires(t *testing.T) {
+	cfg := voiceConfig{wakeWord: "hey agent"} // follow-ups disabled: bare wake still listens 10s
+	h := newVoiceFollowUpHarness()
+	h.say(t, cfg, "hey agent")
+	if want := h.now.Add(voiceBareWakeWindow); !h.state.until.Equal(want) {
+		t.Fatalf("until=%v want %v", h.state.until, want)
+	}
+	h.now = h.now.Add(11 * time.Second)
+	h.say(t, cfg, "what time is it")
+	if len(h.prompts) != 0 || h.tones != 0 {
+		t.Fatalf("accepted after bare-wake window closed: %v", h.prompts)
+	}
+	h.say(t, cfg, "hey agent")
+	h.now = h.now.Add(9 * time.Second)
+	h.say(t, cfg, "what time is it")
+	if len(h.prompts) != 1 || !h.state.until.IsZero() {
+		t.Fatalf("in-window request: %v until=%v", h.prompts, h.state.until)
+	}
+}
+
+func TestVoiceBareWakeWithoutState(t *testing.T) {
+	var spoken []string
+	d := voiceDeps{reply: func(context.Context, string) (string, error) {
+		t.Fatal("bare wake reached the agent")
+		return "", nil
+	}, speak: func(_ context.Context, text string) error { spoken = append(spoken, text); return nil }}
+	if err := handleVoiceText(context.Background(), voiceConfig{wakeWord: "hey agent"}, d, "Hey, agent!"); err != nil {
+		t.Fatal(err)
+	}
+	if len(spoken) != 1 || spoken[0] != "I'm listening." {
+		t.Fatal(spoken)
 	}
 }

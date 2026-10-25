@@ -471,7 +471,10 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 		return nil
 	}
 	prompt, wake := stripWakeWord(transcript, cfg.wakeWord)
-	inWindow := state != nil && cfg.followUp > 0 && !state.until.IsZero() && !startedAt.After(state.until)
+	if wake && strings.TrimSpace(cfg.wakeWord) != "" && voiceFollowUpNoise(prompt) {
+		return handleVoiceBareWake(ctx, cfg, d, state)
+	}
+	inWindow := state != nil && !state.until.IsZero() && !startedAt.After(state.until)
 	followUp := inWindow && (!wake || prompt != "")
 	if followUp && !wake {
 		prompt = strings.TrimSpace(transcript)
@@ -520,6 +523,28 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 	voiceLog(d, "voice speech playback complete")
 	if state != nil && cfg.followUp > 0 {
 		state.until = voiceNow(d).Add(cfg.followUp)
+		voiceLog(d, "voice follow-up window open")
+	}
+	return nil
+}
+
+// voiceBareWakeWindow is the listening window after a bare wake phrase when follow-ups are disabled.
+const voiceBareWakeWindow = 10 * time.Second
+
+// handleVoiceBareWake acknowledges a wake phrase spoken alone and opens a listening
+// window so the request can arrive as the next utterance without the wake phrase.
+func handleVoiceBareWake(ctx context.Context, cfg voiceConfig, d voiceDeps, state *voiceFollowUpState) error {
+	voiceLog(d, "voice transcription complete wake_match=true follow_up=false")
+	voiceLog(d, "voice wake only; listening")
+	if err := d.speak(ctx, "I'm listening."); err != nil {
+		return voiceProcessFailure("acknowledgement playback failed", err)
+	}
+	if state != nil {
+		window := cfg.followUp
+		if window <= 0 {
+			window = voiceBareWakeWindow
+		}
+		state.until = voiceNow(d).Add(window)
 		voiceLog(d, "voice follow-up window open")
 	}
 	return nil
@@ -678,12 +703,30 @@ func voiceReplyChunks(reply string) []string {
 	}
 	return chunks
 }
+
+// voiceWakeVariants are conservative Whisper mishearings accepted for the default wake phrase.
+var voiceWakeVariants = map[string][]string{"hey agent": {"hi agent", "hey agents"}}
+
+// stripWakeWord removes a leading wake phrase (or one of its known variants) and
+// reports whether it matched. Case and surrounding punctuation are ignored.
 func stripWakeWord(transcript, wake string) (string, bool) {
 	transcript = strings.TrimSpace(transcript)
 	wake = strings.TrimSpace(wake)
 	if wake == "" {
 		return transcript, true
 	}
+	if prompt, ok := stripWakePhrase(transcript, wake); ok {
+		return prompt, true
+	}
+	for _, variant := range voiceWakeVariants[strings.ToLower(strings.Join(strings.Fields(wake), " "))] {
+		if prompt, ok := stripWakePhrase(transcript, variant); ok {
+			return prompt, true
+		}
+	}
+	return "", false
+}
+
+func stripWakePhrase(transcript, wake string) (string, bool) {
 	separator := func(r rune) bool { return unicode.IsPunct(r) || unicode.IsSpace(r) }
 	remainder := strings.TrimLeftFunc(transcript, separator)
 	words := strings.Fields(wake)
