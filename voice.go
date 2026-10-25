@@ -74,6 +74,11 @@ type voiceConfig struct {
 	maxUtterance time.Duration
 	// followUp accepts utterances without the wake phrase for this long after a reply; zero disables.
 	followUp time.Duration
+	// access is "read" or "work" (Claude only); work enables progress updates.
+	access string
+	// stillWorkingAfter and stillWorkingEvery pace "Still working." during long
+	// work turns; zero stillWorkingAfter disables them.
+	stillWorkingAfter, stillWorkingEvery time.Duration
 }
 
 // voiceFollowUpState tracks when the wake-word-free follow-up window closes.
@@ -104,6 +109,10 @@ type voiceDeps struct {
 	now        func() time.Time
 	// tone plays the short follow-up acknowledgement; nil skips it.
 	tone func(context.Context) error
+	// record appends to the private transcript; nil disables it.
+	record func(role, kind, text string) error
+	// audio serializes speech between spoken approvals and "Still working." updates.
+	audio *sync.Mutex
 }
 
 func voiceNow(d voiceDeps) time.Time {
@@ -123,18 +132,48 @@ func voiceCommand(args []string) error {
 	speechGain := f.Float64("speech-gain", defaultSpeechGain, "Speech gain in dB passed to speak, -20 to 20")
 	maxUtterance := f.Duration("max-utterance", voiceMaxDuration, "Longest captured utterance, 2s to 60s")
 	followUp := f.Duration("follow-up", voiceFollowUp, "Accept replies without the wake phrase for this long after speaking; 0 disables, max 120s")
+	access := f.String("access", voiceAccessWork, "Claude access: read (read-only tools) or work (all tools, spoken approval)")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if f.NArg() != 0 || *source == "" || math.IsNaN(*threshold) || *threshold <= 0 || *threshold >= 1 || (*agentName != "claude" && *agentName != "codex") || !validSpeechGain(*speechGain) ||
-		*maxUtterance < voiceMinUtterance || *maxUtterance > voiceMaxUtterance || *followUp < 0 || *followUp > voiceMaxFollowUp {
-		return errors.New("usage: agent-bridge voice [--agent claude|codex] [--source NAME] [--wake-word PHRASE] [--vad-threshold 0.018] [--speech-gain 6] [--max-utterance 30s] [--follow-up 20s] [--file WAV]")
+	accessSet := false
+	f.Visit(func(fl *flag.Flag) { accessSet = accessSet || fl.Name == "access" })
+	if *agentName == "codex" {
+		// Codex stays read-only; an explicit work request is a usage error.
+		if accessSet && *access != voiceAccessRead {
+			return errors.New("voice: --access work requires --agent claude")
+		}
+		*access = voiceAccessRead
 	}
-	cfg := voiceConfig{source: *source, wakeWord: *wake, file: *file, threshold: *threshold, maxUtterance: *maxUtterance, followUp: *followUp}
+	if f.NArg() != 0 || *source == "" || math.IsNaN(*threshold) || *threshold <= 0 || *threshold >= 1 || (*agentName != "claude" && *agentName != "codex") || !validSpeechGain(*speechGain) ||
+		*maxUtterance < voiceMinUtterance || *maxUtterance > voiceMaxUtterance || *followUp < 0 || *followUp > voiceMaxFollowUp || (*access != voiceAccessRead && *access != voiceAccessWork) {
+		return errors.New("usage: agent-bridge voice [--agent claude|codex] [--access read|work] [--source NAME] [--wake-word PHRASE] [--vad-threshold 0.018] [--speech-gain 6] [--max-utterance 30s] [--follow-up 20s] [--file WAV]")
+	}
+	cfg := voiceConfig{source: *source, wakeWord: *wake, file: *file, threshold: *threshold, maxUtterance: *maxUtterance, followUp: *followUp, access: *access}
+	if cfg.access == voiceAccessWork {
+		cfg.stillWorkingAfter, cfg.stillWorkingEvery = 20*time.Second, 60*time.Second
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	d := realVoiceDeps(*agentName, *speechGain)
+	socket, err := voiceApprovalSocketPath()
+	if err != nil {
+		return err
+	}
+	d := realVoiceDeps(*agentName, *speechGain, cfg.access, socket)
 	defer d.close()
+	if path, err := voiceTranscriptPath(); err == nil {
+		d.record = newVoiceTranscript(path).Append
+	}
+	if cfg.access == voiceAccessWork {
+		approver := &voiceApprover{cfg: cfg, d: d}
+		stopApprovals, err := serveVoiceApprovals(socket, approver.decide)
+		if err != nil {
+			// Without the socket every approval denies; reading still works.
+			log.Printf("voice approval socket unavailable; actions will be denied")
+		} else {
+			defer stopApprovals()
+		}
+	}
 	if cfg.file != "" {
 		return runVoiceFile(ctx, cfg, d)
 	}
@@ -146,15 +185,15 @@ type voiceReplier interface {
 	Close() error
 }
 
-func realVoiceDeps(agentName string, speechGain float64) voiceDeps {
-	var agent voiceReplier = newVoiceClaude()
+func realVoiceDeps(agentName string, speechGain float64, access, socket string) voiceDeps {
+	var agent voiceReplier = newVoiceClaudeAccess(access, socket)
 	if agentName == "codex" {
 		agent = newVoiceAgent()
 	}
 	lastLevel := time.Time{}
 	tone := &voiceTonePlayer{}
 	closeAll := func() error { return errors.Join(agent.Close(), tone.close()) }
-	return voiceDeps{capture: startVoiceCapture, transcribe: transcribeVoice, reply: agent.Reply, close: closeAll, tone: tone.play, speak: func(ctx context.Context, text string) error { return speakVoice(ctx, text, speechGain) }, logf: log.Printf, pause: voicePause,
+	return voiceDeps{capture: startVoiceCapture, transcribe: transcribeVoice, reply: agent.Reply, close: closeAll, tone: tone.play, audio: &sync.Mutex{}, speak: func(ctx context.Context, text string) error { return speakVoice(ctx, text, speechGain) }, logf: log.Printf, pause: voicePause,
 		observe: func(level float64, trigger bool) {
 			if trigger || time.Since(lastLevel) >= 5*time.Second {
 				log.Printf("voice microphone rms=%.3f trigger=%t", level, trigger)
@@ -331,10 +370,14 @@ func runVoice(ctx context.Context, cfg voiceConfig, d voiceDeps) error {
 		startedAt := voiceNow(d).Add(-time.Duration(len(pcm)/2) * time.Second / voiceRate)
 		if err = handleVoicePCMTurn(ctx, cfg, d, followUp, startedAt, pcm); err != nil && ctx.Err() == nil {
 			d.logf("voice %s", voiceDiagnostic(err))
+			voiceRecord(d, "system", "error", voiceDiagnostic(err))
 			message := "Voice request failed. Check the service journal."
 			var failure voiceFailure
 			if errors.As(err, &failure) && strings.HasPrefix(failure.code, "agent ") {
 				message = "I could not complete that request. Voice access is read only."
+				if cfg.access == voiceAccessWork {
+					message = "I could not complete that request."
+				}
 			}
 			voiceFailureFeedback(ctx, d, &lastFeedback, message)
 		}
@@ -492,7 +535,9 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 		// Accepted turns consume the window; only a completed reply reopens it.
 		state.until = time.Time{}
 	}
+	voiceRecord(d, "user", "prompt", prompt)
 	if !followUp {
+		voiceRecord(d, "system", "status", "Wake phrase heard; listening.")
 		voiceLog(d, "voice acknowledgement playback start")
 		if err := d.speak(ctx, "I'm listening."); err != nil {
 			return voiceProcessFailure("acknowledgement playback failed", err)
@@ -505,7 +550,10 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 		}
 	}
 	voiceLog(d, "voice agent turn start")
+	voiceRecord(d, "system", "status", "Agent turn started.")
+	stopProgress := startVoiceProgress(ctx, cfg, d)
 	reply, err := d.reply(ctx, prompt)
+	stopProgress()
 	if err != nil {
 		return voiceFailure{code: "agent reply failed", status: voiceDiagnostic(err)}
 	}
@@ -514,6 +562,7 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 	if reply == "" || !utf8.ValidString(reply) {
 		return voiceFailure{code: "agent reply invalid"}
 	}
+	voiceRecord(d, "agent", "reply", reply)
 	voiceLog(d, "voice speech playback start")
 	for _, chunk := range voiceReplyChunks(reply) {
 		if err = d.speak(ctx, chunk); err != nil {
@@ -528,6 +577,44 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 	return nil
 }
 
+// startVoiceProgress speaks "Still working." while a long turn runs, at most once
+// per stillWorkingEvery. It skips an update while an approval holds the audio.
+// The returned function stops it and waits for any update in progress.
+func startVoiceProgress(ctx context.Context, cfg voiceConfig, d voiceDeps) func() {
+	if cfg.stillWorkingAfter <= 0 || d.speak == nil {
+		return func() {}
+	}
+	every := cfg.stillWorkingEvery
+	if every <= 0 {
+		every = time.Minute
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wait := cfg.stillWorkingAfter
+		for {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if d.audio == nil || d.audio.TryLock() {
+				_ = d.speak(ctx, "Still working.")
+				if d.audio != nil {
+					d.audio.Unlock()
+				}
+				wait = every
+			} else {
+				wait = 5 * time.Second
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
+}
+
 // voiceBareWakeWindow is the listening window after a bare wake phrase when follow-ups are disabled.
 const voiceBareWakeWindow = 10 * time.Second
 
@@ -536,6 +623,7 @@ const voiceBareWakeWindow = 10 * time.Second
 func handleVoiceBareWake(ctx context.Context, cfg voiceConfig, d voiceDeps, state *voiceFollowUpState) error {
 	voiceLog(d, "voice transcription complete wake_match=true follow_up=false")
 	voiceLog(d, "voice wake only; listening")
+	voiceRecord(d, "system", "status", "Wake phrase heard; listening.")
 	if err := d.speak(ctx, "I'm listening."); err != nil {
 		return voiceProcessFailure("acknowledgement playback failed", err)
 	}
@@ -705,13 +793,58 @@ func voiceReplyChunks(reply string) []string {
 }
 
 // voiceWakeVariants are conservative Whisper mishearings accepted for the default wake phrase.
-// Every variant matches only at the start of the transcript, so a bare "agent" accepts
+// Multi-word variants match anywhere like the phrase; a single-word variant matches
+// only at the start of the transcript, so a bare "agent" accepts
 // "Agent, testing" (a clipped "hey") but never "the agent is".
 var voiceWakeVariants = map[string][]string{"hey agent": {"hi agent", "hey agents", "agent"}}
 
-// stripWakeWord removes a leading wake phrase (or one of its known variants) and
-// reports whether it matched. Case and surrounding punctuation are ignored.
+// stripWakeWord finds the wake phrase (or a multi-word variant) anywhere in the
+// transcript and returns the text after its last occurrence, so lead-in chatter
+// such as "Hello, hello, hey agent, are you listening?" still matches. Single-word
+// variants (a bare "agent") match only at the start. Case and punctuation are ignored.
 func stripWakeWord(transcript, wake string) (string, bool) {
+	transcript = strings.TrimSpace(transcript)
+	wake = strings.TrimSpace(wake)
+	if wake == "" {
+		return transcript, true
+	}
+	phrases := []string{wake}
+	var leadingOnly []string
+	for _, variant := range voiceWakeVariants[strings.ToLower(strings.Join(strings.Fields(wake), " "))] {
+		if len(strings.Fields(variant)) > 1 {
+			phrases = append(phrases, variant)
+		} else {
+			leadingOnly = append(leadingOnly, variant)
+		}
+	}
+	best, prompt := -1, ""
+	for i := 0; i < len(transcript); i++ {
+		if i > 0 {
+			prev, _ := utf8.DecodeLastRuneInString(transcript[:i])
+			if !utf8.RuneStart(transcript[i]) || unicode.IsLetter(prev) || unicode.IsDigit(prev) || prev == '_' {
+				continue
+			}
+		}
+		for _, phrase := range phrases {
+			if rest, ok := stripWakePhrase(transcript[i:], phrase); ok && i > best {
+				best, prompt = i, rest
+			}
+		}
+	}
+	if best >= 0 {
+		return prompt, true
+	}
+	for _, variant := range leadingOnly {
+		if rest, ok := stripWakePhrase(transcript, variant); ok {
+			return rest, true
+		}
+	}
+	return "", false
+}
+
+// stripLeadingWakeWord removes a wake phrase or variant only at the start of the
+// transcript. Spoken approvals use it so earlier speech cannot be skipped over.
+func stripLeadingWakeWord(transcript, wake string) (string, bool) {
 	transcript = strings.TrimSpace(transcript)
 	wake = strings.TrimSpace(wake)
 	if wake == "" {

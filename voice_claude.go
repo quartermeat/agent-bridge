@@ -13,10 +13,14 @@ import (
 	"time"
 )
 
-// voiceClaude answers each voice turn with one read-only `claude -p` run. Claude
-// Code owns the conversation history; agent-bridge stores only its session ID.
+// voiceClaude answers each voice turn with one `claude -p` run. Claude Code owns
+// the conversation history; agent-bridge stores only its session ID. In "read"
+// access the run is read-only; in "work" access every tool beyond reading asks the
+// voice approval MCP server, which relays to the daemon's spoken approval.
 type voiceClaude struct {
 	mu        sync.Mutex
+	access    string
+	mcpConfig string
 	bin       string
 	statePath string
 	stateErr  error
@@ -29,14 +33,33 @@ const (
 	voiceClaudeTools     = "Read,Grep,Glob"
 	voiceClaudeDenied    = "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"
 	voiceClaudeMaxOutput = 256 << 10
+	voiceAccessRead      = "read"
+	voiceAccessWork      = "work"
+	voiceWorkTimeout     = 30 * time.Minute
 )
 
-func newVoiceClaude() *voiceClaude {
+// voiceWorkInstructions replace voiceDeveloperInstructions in work access.
+const voiceWorkInstructions = "You are operating the user's PC by voice. Spoken replies must be brief (one to three sentences). Actions that change anything are gated by spoken approval; describe what you will do before doing it."
+
+// newVoiceClaude returns a read-only voice Claude backend.
+func newVoiceClaude() *voiceClaude { return newVoiceClaudeAccess(voiceAccessRead, "") }
+
+// newVoiceClaudeAccess returns a backend for access "read" or "work"; work routes
+// permission prompts through `agent-bridge voice-approval-mcp --socket socket`.
+func newVoiceClaudeAccess(access, socket string) *voiceClaude {
 	bin := os.Getenv("AGENT_BRIDGE_CLAUDE_BIN")
 	if bin == "" {
 		bin = "claude"
 	}
-	c := &voiceClaude{bin: bin, timeout: 3 * time.Minute}
+	c := &voiceClaude{bin: bin, access: voiceAccessRead, timeout: 3 * time.Minute}
+	if access == voiceAccessWork {
+		self, err := os.Executable()
+		if err != nil {
+			c.stateErr = err
+			return c
+		}
+		c.access, c.timeout, c.mcpConfig = voiceAccessWork, voiceWorkTimeout, voiceApprovalMCPConfig(self, socket)
+	}
 	r, err := root()
 	if err != nil {
 		c.stateErr = err
@@ -114,6 +137,22 @@ func validVoiceSessionID(id string) bool {
 }
 
 func (c *voiceClaude) args(session string) []string {
+	if c.access == voiceAccessWork {
+		// No --tools restriction: the full tool set is available, but only reads are
+		// pre-allowed; every other call reaches the spoken-approval prompt tool.
+		args := []string{"-p", "--output-format", "json",
+			"--allowed-tools=" + voiceClaudeTools,
+			"--permission-mode", "manual",
+			"--strict-mcp-config",
+			"--mcp-config=" + c.mcpConfig,
+			"--permission-prompt-tool", voiceApprovalTool,
+			"--disallowed-tools=" + voiceApprovalTool,
+			"--append-system-prompt", voiceWorkInstructions}
+		if session != "" {
+			args = append(args, "--resume", session)
+		}
+		return args
+	}
 	args := []string{"-p", "--output-format", "json",
 		"--tools=" + voiceClaudeTools,
 		"--allowed-tools=" + voiceClaudeTools,

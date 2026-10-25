@@ -58,7 +58,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|_worker")
+		return errors.New("usage: agent-bridge start|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log|_worker")
 	}
 	switch args[0] {
 	case "start":
@@ -87,6 +87,11 @@ func run(args []string) error {
 		return speak(args[1:])
 	case "voice":
 		return voiceCommand(args[1:])
+	case "voice-log":
+		return voiceLogCommand(args[1:])
+	case "voice-approval-mcp":
+		// Hidden: launched by Claude Code as the voice permission-prompt tool.
+		return voiceApprovalMCPCommand(args[1:])
 	case "_worker":
 		if len(args) != 2 {
 			return errors.New("worker needs a job ID")

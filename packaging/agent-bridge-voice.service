@@ -6,10 +6,11 @@ After=graphical-session.target pipewire.service pipewire-pulse.service
 [Service]
 Type=simple
 WorkingDirectory=%h
-# Voice requests go to a read-only Claude Code session (--agent codex selects Codex). Journal RMS readings help tune --vad-threshold.
+# Voice requests go to a Claude Code session with full tools; anything beyond reading needs a spoken "approve" (--access read restores read-only, --agent codex selects read-only Codex).
+# Transcript: agent-bridge voice-log --follow Journal RMS readings help tune --vad-threshold.
 # Select Starship Rear Mic before capture; its ALSA mux can otherwise remain on Line.
 ExecStartPre=/usr/bin/amixer -c Generic sset "Input Source,0" "Rear Mic"
-ExecStart=%h/.local/bin/agent-bridge voice --agent claude --source alsa_input.pci-0000_28_00.4.analog-stereo --wake-word "hey agent" --vad-threshold 0.03 --speech-gain 6 --max-utterance 30s --follow-up 20s
+ExecStart=%h/.local/bin/agent-bridge voice --agent claude --access work --source alsa_input.pci-0000_28_00.4.analog-stereo --wake-word "hey agent" --vad-threshold 0.03 --speech-gain 6 --max-utterance 30s --follow-up 20s
 Restart=on-failure
 RestartSec=5s
 UMask=0077
