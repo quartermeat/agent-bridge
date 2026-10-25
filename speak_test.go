@@ -18,7 +18,7 @@ func TestSpeakPreservesTextAndCleansPrivateFiles(t *testing.T) {
 		args  []string
 		input string
 	}{
-		{"flag", []string{"--voice", "kal16", "--text", want}, "ignored"},
+		{"flag", []string{"--voice", "kal16", "--gain", "-2.5", "--text", want}, "ignored"},
 		{"stdin", nil, want},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,11 +43,11 @@ func TestSpeakPreservesTextAndCleansPrivateFiles(t *testing.T) {
 					t.Fatalf("speech text = %q, err = %v", data, err)
 				}
 				if name == "/fake/ffmpeg" {
-					voice := "slt"
+					voice, gain := "slt", "6"
 					if tc.name == "flag" {
-						voice = "kal16"
+						voice, gain = "kal16", "-2.5"
 					}
-					wantArgs := []string{"-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "flite=textfile=speech.txt:voice=" + voice, "-ac", "2", "-f", "wav", "speech.wav"}
+					wantArgs := []string{"-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "flite=textfile=speech.txt:voice=" + voice, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11,volume=" + gain + "dB,alimiter=limit=0.95", "-ac", "2", "-ar", "48000", "-f", "wav", "speech.wav"}
 					if !reflect.DeepEqual(args, wantArgs) {
 						t.Fatalf("ffmpeg args = %q", args)
 					}
@@ -84,6 +84,10 @@ func TestSpeakRejectsInvalidInputBeforeCommands(t *testing.T) {
 		{"oversize stdin", nil, strings.Repeat("x", maxSpeechBytes+1), "exceeds"},
 		{"bad voice", []string{"--voice", "slt;echo bad", "--text", "hello"}, "", "unsupported voice"},
 		{"NUL", []string{"--text", "hello\x00world"}, "", "NUL"},
+		{"gain too high", []string{"--gain", "20.5", "--text", "hello"}, "", "gain"},
+		{"gain too low", []string{"--gain", "-21", "--text", "hello"}, "", "gain"},
+		{"gain NaN", []string{"--gain", "NaN", "--text", "hello"}, "", "gain"},
+		{"gain not number", []string{"--gain", "loud", "--text", "hello"}, "", "invalid value"},
 		{"extra argument", []string{"--text", "hello", "extra"}, "", "usage"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,6 +134,20 @@ func TestSpeakReportsDependenciesAndCommandFailures(t *testing.T) {
 		}
 		if failing == "ffmpeg" && len(calls) != 1 {
 			t.Fatalf("playback ran after synthesis failure: %q", calls)
+		}
+	}
+}
+
+func TestSpeechFilterAndVoiceGain(t *testing.T) {
+	if got := speechFilter(6); got != "loudnorm=I=-14:TP=-1.5:LRA=11,volume=6dB,alimiter=limit=0.95" {
+		t.Fatalf("filter = %q", got)
+	}
+	if got := speakVoiceArgs(-3.5); !reflect.DeepEqual(got, []string{"speak", "--gain", "-3.5"}) {
+		t.Fatalf("voice speak args = %q", got)
+	}
+	for _, gain := range []string{"21", "-20.01", "NaN", "loud"} {
+		if err := voiceCommand([]string{"--speech-gain", gain}); err == nil {
+			t.Fatalf("voice accepted --speech-gain %s", gain)
 		}
 	}
 }

@@ -82,16 +82,17 @@ func voiceCommand(args []string) error {
 	threshold := f.Float64("vad-threshold", 0.018, "RMS speech threshold from 0 to 1")
 	file := f.String("file", "", "Transcribe one existing WAV file and exit")
 	agentName := f.String("agent", "claude", "Reply backend: claude or codex")
+	speechGain := f.Float64("speech-gain", defaultSpeechGain, "Speech gain in dB passed to speak, -20 to 20")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if f.NArg() != 0 || *source == "" || math.IsNaN(*threshold) || *threshold <= 0 || *threshold >= 1 || (*agentName != "claude" && *agentName != "codex") {
-		return errors.New("usage: agent-bridge voice [--agent claude|codex] [--source NAME] [--wake-word PHRASE] [--vad-threshold 0.018] [--file WAV]")
+	if f.NArg() != 0 || *source == "" || math.IsNaN(*threshold) || *threshold <= 0 || *threshold >= 1 || (*agentName != "claude" && *agentName != "codex") || !validSpeechGain(*speechGain) {
+		return errors.New("usage: agent-bridge voice [--agent claude|codex] [--source NAME] [--wake-word PHRASE] [--vad-threshold 0.018] [--speech-gain 6] [--file WAV]")
 	}
 	cfg := voiceConfig{source: *source, wakeWord: *wake, file: *file, threshold: *threshold}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	d := realVoiceDeps(*agentName)
+	d := realVoiceDeps(*agentName, *speechGain)
 	defer d.close()
 	if cfg.file != "" {
 		return runVoiceFile(ctx, cfg, d)
@@ -104,13 +105,13 @@ type voiceReplier interface {
 	Close() error
 }
 
-func realVoiceDeps(agentName string) voiceDeps {
+func realVoiceDeps(agentName string, speechGain float64) voiceDeps {
 	var agent voiceReplier = newVoiceClaude()
 	if agentName == "codex" {
 		agent = newVoiceAgent()
 	}
 	lastLevel := time.Time{}
-	return voiceDeps{capture: startVoiceCapture, transcribe: transcribeVoice, reply: agent.Reply, close: agent.Close, speak: speakVoice, logf: log.Printf, pause: voicePause,
+	return voiceDeps{capture: startVoiceCapture, transcribe: transcribeVoice, reply: agent.Reply, close: agent.Close, speak: func(ctx context.Context, text string) error { return speakVoice(ctx, text, speechGain) }, logf: log.Printf, pause: voicePause,
 		observe: func(level float64, trigger bool) {
 			if trigger || time.Since(lastLevel) >= 5*time.Second {
 				log.Printf("voice microphone rms=%.3f trigger=%t", level, trigger)
@@ -524,7 +525,7 @@ func limitedCommandOutput(cmd *exec.Cmd, limit int64) ([]byte, error) {
 	// Output is returned with a non-zero exit so callers can read a structured error.
 	return b, cmd.Wait()
 }
-func speakVoice(ctx context.Context, text string) error {
+func speakVoice(ctx context.Context, text string, gainDB float64) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -534,7 +535,7 @@ func speakVoice(ctx context.Context, text string) error {
 		return errors.New("private playback directory failed")
 	}
 	defer os.RemoveAll(dir)
-	cmd := exec.Command(self, "speak")
+	cmd := exec.Command(self, speakVoiceArgs(gainDB)...)
 	cmd.Env = append(os.Environ(), "TMPDIR="+dir)
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Stdout = io.Discard
@@ -553,4 +554,8 @@ func speakVoice(ctx context.Context, text string) error {
 		<-done
 		return ctx.Err()
 	}
+}
+
+func speakVoiceArgs(gainDB float64) []string {
+	return []string{"speak", "--gain", strconv.FormatFloat(gainDB, 'f', -1, 64)}
 }
