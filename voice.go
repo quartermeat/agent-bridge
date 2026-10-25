@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -101,6 +102,8 @@ type voiceDeps struct {
 	pause      func(context.Context, time.Duration) error
 	observe    func(float64, bool)
 	now        func() time.Time
+	// tone plays the short follow-up acknowledgement; nil skips it.
+	tone func(context.Context) error
 }
 
 func voiceNow(d voiceDeps) time.Time {
@@ -149,7 +152,9 @@ func realVoiceDeps(agentName string, speechGain float64) voiceDeps {
 		agent = newVoiceAgent()
 	}
 	lastLevel := time.Time{}
-	return voiceDeps{capture: startVoiceCapture, transcribe: transcribeVoice, reply: agent.Reply, close: agent.Close, speak: func(ctx context.Context, text string) error { return speakVoice(ctx, text, speechGain) }, logf: log.Printf, pause: voicePause,
+	tone := &voiceTonePlayer{}
+	closeAll := func() error { return errors.Join(agent.Close(), tone.close()) }
+	return voiceDeps{capture: startVoiceCapture, transcribe: transcribeVoice, reply: agent.Reply, close: closeAll, tone: tone.play, speak: func(ctx context.Context, text string) error { return speakVoice(ctx, text, speechGain) }, logf: log.Printf, pause: voicePause,
 		observe: func(level float64, trigger bool) {
 			if trigger || time.Since(lastLevel) >= 5*time.Second {
 				log.Printf("voice microphone rms=%.3f trigger=%t", level, trigger)
@@ -470,9 +475,9 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 	followUp := inWindow && (!wake || prompt != "")
 	if followUp && !wake {
 		prompt = strings.TrimSpace(transcript)
-		if len(strings.Fields(prompt)) < 2 {
-			// Too short to be a request; leave the window open.
-			voiceLog(d, "voice transcription complete wake_match=false follow_up=false; short follow-up ignored")
+		if voiceFollowUpNoise(prompt) {
+			// Likely a Whisper hallucination or echo; leave the window open.
+			voiceLog(d, "voice transcription complete wake_match=false follow_up=false; follow-up noise ignored")
 			return nil
 		}
 	}
@@ -490,6 +495,11 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 			return voiceProcessFailure("acknowledgement playback failed", err)
 		}
 		voiceLog(d, "voice acknowledgement playback complete")
+	} else if d.tone != nil {
+		voiceLog(d, "voice follow-up tone playback")
+		if err := d.tone(ctx); err != nil {
+			voiceLog(d, "voice follow-up tone playback failed")
+		}
 	}
 	voiceLog(d, "voice agent turn start")
 	reply, err := d.reply(ctx, prompt)
@@ -514,6 +524,131 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 	}
 	return nil
 }
+
+// voiceNoisePhrases are common Whisper hallucinations on silence or echo.
+var voiceNoisePhrases = map[string]bool{"you": true, "thank you": true, "thanks for watching": true, "bye": true, "uh": true, "um": true, "hmm": true, "blank audio": true}
+
+// voiceFollowUpNoise reports whether a wake-free follow-up is likely noise rather than a request.
+func voiceFollowUpNoise(text string) bool {
+	text = strings.TrimSpace(text)
+	var outside strings.Builder
+	depth := 0
+	for _, r := range text {
+		switch r {
+		case '[', '(':
+			depth++
+		case ']', ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 {
+				outside.WriteRune(r)
+			}
+		}
+	}
+	normalized := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return ' '
+	}, outside.String())), " ")
+	// Bracket-only transcripts such as "[BLANK_AUDIO]" or "(music)" leave nothing outside.
+	return normalized == "" || voiceNoisePhrases[normalized]
+}
+
+const (
+	voiceToneRate      = 48000
+	voiceToneHz        = 880.0
+	voiceToneDuration  = 150 * time.Millisecond
+	voiceToneFade      = 25 * time.Millisecond
+	voiceToneAmplitude = 0.25
+)
+
+// voiceToneWAV returns a mono 16-bit WAV of a soft sine beep with raised-cosine fades.
+func voiceToneWAV() []byte {
+	n := int(voiceToneDuration * voiceToneRate / time.Second)
+	fade := int(voiceToneFade * voiceToneRate / time.Second)
+	b := make([]byte, 44+2*n)
+	copy(b, "RIFF")
+	binary.LittleEndian.PutUint32(b[4:], uint32(36+2*n))
+	copy(b[8:], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(b[16:], 16)
+	binary.LittleEndian.PutUint16(b[20:], 1)
+	binary.LittleEndian.PutUint16(b[22:], 1)
+	binary.LittleEndian.PutUint32(b[24:], voiceToneRate)
+	binary.LittleEndian.PutUint32(b[28:], voiceToneRate*2)
+	binary.LittleEndian.PutUint16(b[32:], 2)
+	binary.LittleEndian.PutUint16(b[34:], 16)
+	copy(b[36:], "data")
+	binary.LittleEndian.PutUint32(b[40:], uint32(2*n))
+	for i := 0; i < n; i++ {
+		env := 1.0
+		if i < fade {
+			env = 0.5 - 0.5*math.Cos(math.Pi*float64(i)/float64(fade))
+		} else if n-1-i < fade {
+			env = 0.5 - 0.5*math.Cos(math.Pi*float64(n-1-i)/float64(fade))
+		}
+		v := voiceToneAmplitude * env * math.Sin(2*math.Pi*voiceToneHz*float64(i)/voiceToneRate)
+		binary.LittleEndian.PutUint16(b[44+2*i:], uint16(int16(math.Round(v*32767))))
+	}
+	return b
+}
+
+// voiceTonePlayer synthesizes the tone once into a private temp file and replays it with paplay.
+type voiceTonePlayer struct {
+	mu   sync.Mutex
+	dir  string
+	path string
+}
+
+func (t *voiceTonePlayer) file() (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.path != "" {
+		return t.path, nil
+	}
+	dir, err := os.MkdirTemp("", "agent-bridge-voice-tone-")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "tone.wav")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err == nil {
+		_, err = f.Write(voiceToneWAV())
+		err = errors.Join(err, f.Close())
+	}
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	t.dir, t.path = dir, path
+	return path, nil
+}
+
+func (t *voiceTonePlayer) play(ctx context.Context) error {
+	path, err := t.file()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "paplay", path)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	return cmd.Run()
+}
+
+func (t *voiceTonePlayer) close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dir == "" {
+		return nil
+	}
+	err := os.RemoveAll(t.dir)
+	t.dir, t.path = "", ""
+	return err
+}
+
 func voiceReplyChunks(reply string) []string {
 	truncated := len(reply) > voiceMaxSpokenReply
 	if truncated {

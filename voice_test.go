@@ -384,6 +384,7 @@ type voiceFollowUpHarness struct {
 	prompts []string
 	spoken  []string
 	logs    []string
+	tones   int
 	d       voiceDeps
 	state   voiceFollowUpState
 }
@@ -398,6 +399,7 @@ func newVoiceFollowUpHarness() *voiceFollowUpHarness {
 		speak: func(_ context.Context, s string) error { h.spoken = append(h.spoken, s); return nil },
 		logf:  func(format string, args ...any) { h.logs = append(h.logs, fmt.Sprintf(format, args...)) },
 		now:   func() time.Time { return h.now },
+		tone:  func(context.Context) error { h.tones++; return nil },
 	}
 	return h
 }
@@ -421,7 +423,7 @@ func TestVoiceFollowUpWindow(t *testing.T) {
 	}
 	h.now = h.now.Add(10 * time.Second)
 	h.spoken = nil
-	h.say(t, cfg, "okay") // too short: ignored, window kept
+	h.say(t, cfg, "Um.") // noise: ignored, window kept
 	h.say(t, cfg, "and a second question")
 	if len(h.prompts) != 2 || h.prompts[1] != "and a second question" {
 		t.Fatal(h.prompts)
@@ -475,5 +477,96 @@ func TestVoiceDurationFlagBounds(t *testing.T) {
 		if err := voiceCommand(args); err == nil || !strings.Contains(err.Error(), "usage") {
 			t.Fatalf("%v: %v", args, err)
 		}
+	}
+}
+
+func TestVoiceFollowUpToneAndOneWord(t *testing.T) {
+	cfg := voiceConfig{wakeWord: "hey agent", followUp: 20 * time.Second}
+	h := newVoiceFollowUpHarness()
+	h.say(t, cfg, "hey agent first question")
+	if h.tones != 0 {
+		t.Fatal("tone played for a wake-word start")
+	}
+	h.now = h.now.Add(time.Second)
+	h.say(t, cfg, "Yes.")
+	if len(h.prompts) != 2 || h.prompts[1] != "Yes." || h.tones != 1 {
+		t.Fatalf("one-word follow-up: %v tones=%d", h.prompts, h.tones)
+	}
+	if got := strings.Join(h.spoken, "|"); got != "I'm listening.|answer|answer" {
+		t.Fatal("follow-up acknowledged with speech")
+	}
+	h.d.tone = func(context.Context) error { return errors.New("no paplay") }
+	h.say(t, cfg, "go on")
+	if len(h.prompts) != 3 {
+		t.Fatal("tone failure aborted the turn")
+	}
+	logs := strings.Join(h.logs, "|")
+	if !strings.Contains(logs, "voice follow-up tone playback|") || !strings.Contains(logs, "voice follow-up tone playback failed") {
+		t.Fatal(logs)
+	}
+}
+
+func TestVoiceFollowUpNoise(t *testing.T) {
+	for _, noise := range []string{"you", "You.", "Thank you!", "thanks for watching", "Bye.", "uh", "Um...", "Hmm?", "blank audio", "[BLANK_AUDIO]", "(music)", " [Music] (applause) ", "...", ""} {
+		if !voiceFollowUpNoise(noise) {
+			t.Errorf("%q not treated as noise", noise)
+		}
+	}
+	for _, real := range []string{"yes", "No.", "thank you very much", "you there?", "stop", "[pause] continue"} {
+		if voiceFollowUpNoise(real) {
+			t.Errorf("%q treated as noise", real)
+		}
+	}
+	cfg := voiceConfig{wakeWord: "hey agent", followUp: 20 * time.Second}
+	h := newVoiceFollowUpHarness()
+	h.say(t, cfg, "hey agent hello")
+	h.say(t, cfg, "[BLANK_AUDIO]")
+	h.say(t, cfg, "Thank you.")
+	if len(h.prompts) != 1 || h.state.until.IsZero() || h.tones != 0 {
+		t.Fatalf("noise consumed the window: %v", h.prompts)
+	}
+	if !strings.Contains(strings.Join(h.logs, "|"), "follow-up noise ignored") {
+		t.Fatal(h.logs)
+	}
+}
+
+func TestVoiceToneWAVAndPlayerFile(t *testing.T) {
+	wav := voiceToneWAV()
+	if string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" || binary.LittleEndian.Uint32(wav[24:]) != voiceToneRate {
+		t.Fatal("bad WAV header")
+	}
+	samples := (len(wav) - 44) / 2
+	if samples != voiceToneRate*150/1000 {
+		t.Fatalf("samples=%d", samples)
+	}
+	peak := 0
+	for i := 0; i < samples; i++ {
+		v := int(int16(binary.LittleEndian.Uint16(wav[44+2*i:])))
+		if v < 0 {
+			v = -v
+		}
+		peak = max(peak, v)
+	}
+	first := int16(binary.LittleEndian.Uint16(wav[44:]))
+	last := int16(binary.LittleEndian.Uint16(wav[len(wav)-2:]))
+	if peak < 6000 || peak > 9000 || first != 0 || last > 50 || last < -50 {
+		t.Fatalf("peak=%d first=%d last=%d", peak, first, last)
+	}
+	t.Setenv("TMPDIR", t.TempDir())
+	p := &voiceTonePlayer{}
+	path, err := p.file()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := p.file()
+	st, err := os.Stat(path)
+	if err != nil || again != path || st.Mode().Perm() != 0600 || st.Size() != int64(len(wav)) {
+		t.Fatalf("tone file %v %v", st, err)
+	}
+	if err = p.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatal("tone directory not removed")
 	}
 }
