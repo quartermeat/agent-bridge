@@ -22,40 +22,71 @@ func TestParseVoiceApproval(t *testing.T) {
 		"CONFIRM":                   voiceVerdictApprove,
 		"Hey agent, approve.":       voiceVerdictApprove,
 		"Agent approve":             voiceVerdictApprove,
+		"yes":                       voiceVerdictApprove,
+		"Yeah.":                     voiceVerdictApprove,
+		"Yep":                       voiceVerdictApprove,
+		"Yes please.":               voiceVerdictApprove,
+		"Sure!":                     voiceVerdictApprove,
+		"OK":                        voiceVerdictApprove,
+		"Okay.":                     voiceVerdictApprove,
+		"confirmed":                 voiceVerdictApprove,
+		"Do it.":                    voiceVerdictApprove,
+		"Go ahead.":                 voiceVerdictApprove,
+		"go for it":                 voiceVerdictApprove,
+		"Yes, do it.":               voiceVerdictApprove,
+		"Hey agent, yes.":           voiceVerdictApprove,
 		"deny":                      voiceVerdictDeny,
 		"No.":                       voiceVerdictDeny,
+		"Nope":                      voiceVerdictDeny,
+		"denied":                    voiceVerdictDeny,
 		"stop":                      voiceVerdictDeny,
 		"cancel":                    voiceVerdictDeny,
-		"I approve":                 voiceVerdictDeny,
-		"approve and also delete x": voiceVerdictDeny,
-		"yes":                       voiceVerdictDeny,
-		"don't approve":             voiceVerdictDeny,
-		"no, hey agent, approve":    voiceVerdictDeny,
+		"Don't.":                    voiceVerdictDeny,
+		"don’t":                     voiceVerdictDeny,
+		"Do not.":                   voiceVerdictDeny,
+		"Hey agent, no.":            voiceVerdictDeny,
+		"I approve":                 voiceVerdictUnclear,
+		"approve and also delete x": voiceVerdictUnclear,
+		"yes but not that":          voiceVerdictUnclear,
+		"don't approve":             voiceVerdictUnclear,
+		"no, hey agent, approve":    voiceVerdictUnclear,
+		"what is that":              voiceVerdictUnclear,
 		"[BLANK_AUDIO]":             voiceVerdictUnclear,
 		"you":                       voiceVerdictUnclear,
 		"":                          voiceVerdictUnclear,
 	}
 	for in, want := range cases {
 		if got := parseVoiceApproval(in, "hey agent"); got != want {
-			t.Errorf("%q: got %d want %d", in, got, want)
+			t.Errorf("%q: got %v want %v", in, got, want)
 		}
 	}
 }
 
 func TestVoiceApprovalSummary(t *testing.T) {
+	pipeline := `python3 -c "import json,sys; print(json.load(sys.stdin)['x'])" < /tmp/a.json | grep -v '^#' && echo $((1+2))`
+	pipelineJSON, _ := json.Marshal(map[string]string{"command": pipeline})
+	describedJSON, _ := json.Marshal(map[string]string{"command": pipeline, "description": "Count recent voice transcript entries."})
 	cases := []struct {
 		tool, input, spoken, detail string
 	}{
-		{"Bash", `{"command":"a b c d e f g h i j k l m n"}`, "Run command: a b c d e f g h i j k l and more", "Bash: a b c d e f g h i j k l m n"},
-		{"Edit", `{"file_path":"/home/u/x/main.go"}`, "Edit file main.go", "Edit: /home/u/x/main.go"},
-		{"Write", `{"file_path":"/tmp/new.txt"}`, "Write file new.txt", "Write: /tmp/new.txt"},
-		{"WebFetch", `{"url":"https://example.com/a?b"}`, "Fetch example.com", "WebFetch: https://example.com/a?b"},
-		{"mcp__srv__do_thing", `{"x":1}`, "Use tool do thing from srv", `mcp__srv__do_thing: {"x":1}`},
+		{"Bash", string(describedJSON), "Count recent voice transcript entries", "Bash: " + pipeline},
+		{"Bash", string(pipelineJSON), "run a shell command, python3", "Bash: " + pipeline},
+		{"Bash", `{"command":"FOO=1 /home/u/.local/bin/agent-bridge list --json"}`, "run a shell command, agent-bridge", "Bash: FOO=1 /home/u/.local/bin/agent-bridge list --json"},
+		{"Bash", `{"command":"$(rm x)"}`, "run a shell command", "Bash: $(rm x)"},
+		{"Bash", `{"command":"ls","description":"List files; then && run $(x)"}`, "List files then run x", "Bash: ls"},
+		{"Edit", `{"file_path":"/home/u/x/main.go"}`, "edit main.go", "Edit: /home/u/x/main.go"},
+		{"Write", `{"file_path":"/tmp/new.txt"}`, "write new.txt", "Write: /tmp/new.txt"},
+		{"WebFetch", `{"url":"https://example.com:8080/a?b"}`, "fetch example.com", "WebFetch: https://example.com:8080/a?b"},
+		{"TodoWrite", `{}`, "use todo write", "TodoWrite: {}"},
+		{"mcp__srv__do_thing", `{"x":1}`, "use do thing from srv", `mcp__srv__do_thing: {"x":1}`},
 	}
 	for _, c := range cases {
 		spoken, detail := voiceApprovalSummary(voiceApprovalRequest{ToolName: c.tool, Input: json.RawMessage(c.input)})
 		if spoken != c.spoken || detail != c.detail {
 			t.Errorf("%s: %q / %q", c.tool, spoken, detail)
+		}
+		if strings.ContainsAny(spoken, "|&$()<>;\"'`=/*{}[]") {
+			t.Errorf("%s: spoken summary contains code characters: %q", c.tool, spoken)
 		}
 	}
 }
@@ -92,19 +123,26 @@ func fakeApprovalDeps(t *testing.T, heard []string, spoken *[]string, recorded *
 }
 
 func TestVoiceApproverDecide(t *testing.T) {
-	req := voiceApprovalRequest{ToolName: "Bash", Input: json.RawMessage(`{"command":"touch x"}`)}
+	req := voiceApprovalRequest{ToolName: "Bash", Input: json.RawMessage(`{"command":"touch x","description":"Create file x"}`)}
+	const prompt = "Approval needed: Create file x. Say yes or no."
+	const reprompt = "Sorry, yes or no?"
 	cases := []struct {
-		name  string
-		heard []string
-		allow bool
+		name   string
+		heard  []string
+		allow  bool
+		spoken []string
+		trail  []string // approval_heard / approval_verdict records
 	}{
-		{"approve", []string{"Approve."}, true},
-		{"noise then approve", []string{"[BLANK_AUDIO]", "confirm"}, true},
-		{"empty then approve", []string{"", "approved"}, true},
-		{"deny", []string{"no"}, false},
-		{"garbage", []string{"what is that"}, false},
-		{"two noises", []string{"um", "you", "approve"}, false},
-		{"timeout", nil, false},
+		{"yes", []string{"Yes."}, true, []string{prompt}, []string{"approval_heard:Yes.", "approval_verdict:approve"}},
+		{"go ahead", []string{"Hey agent, go ahead."}, true, []string{prompt}, []string{"approval_heard:Hey agent, go ahead.", "approval_verdict:approve"}},
+		{"noise then yes", []string{"[BLANK_AUDIO]", "yeah"}, true, []string{prompt, reprompt}, []string{"approval_heard:[BLANK_AUDIO]", "approval_verdict:unclear", "approval_heard:yeah", "approval_verdict:approve"}},
+		{"empty then approve", []string{"", "approved"}, true, []string{prompt, reprompt}, []string{"approval_heard:(silence)", "approval_verdict:unclear", "approval_heard:approved", "approval_verdict:approve"}},
+		{"unclear then yes", []string{"what is that", "yes"}, true, []string{prompt, reprompt}, []string{"approval_heard:what is that", "approval_verdict:unclear", "approval_heard:yes", "approval_verdict:approve"}},
+		{"no", []string{"no"}, false, []string{prompt}, []string{"approval_heard:no", "approval_verdict:deny"}},
+		{"unclear then no", []string{"hmm maybe", "nope"}, false, []string{prompt, reprompt}, []string{"approval_heard:hmm maybe", "approval_verdict:unclear", "approval_heard:nope", "approval_verdict:deny"}},
+		{"two unclear", []string{"um", "what is that", "yes"}, false, []string{prompt, reprompt}, []string{"approval_heard:um", "approval_verdict:unclear", "approval_heard:what is that", "approval_verdict:unclear"}},
+		{"unclear then timeout", []string{"maybe"}, false, []string{prompt, reprompt}, []string{"approval_heard:maybe", "approval_verdict:unclear", "approval_verdict:deny (nothing heard in time)"}},
+		{"timeout", nil, false, []string{prompt}, []string{"approval_verdict:deny (nothing heard in time)"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -118,13 +156,49 @@ func TestVoiceApproverDecide(t *testing.T) {
 			if c.allow {
 				result = "Approved."
 			}
-			if len(spoken) != 2 || spoken[0] != "Approval needed. Run command: touch x. Say approve or deny." || spoken[1] != result {
-				t.Fatalf("spoken %q", spoken)
+			wantSpoken := append(append([]string{}, c.spoken...), result)
+			if strings.Join(spoken, "|") != strings.Join(wantSpoken, "|") {
+				t.Fatalf("spoken %q want %q", spoken, wantSpoken)
 			}
-			if len(recorded) != 2 || recorded[0] != "approval_request:Bash: touch x" || recorded[1] != "approval_result:"+result+" Bash: touch x" {
-				t.Fatalf("recorded %q", recorded)
+			want := append(append([]string{"approval_request:Bash: touch x"}, c.trail...), "approval_result:"+result+" Bash: touch x")
+			if strings.Join(recorded, "|") != strings.Join(want, "|") {
+				t.Fatalf("recorded %q want %q", recorded, want)
 			}
 		})
+	}
+}
+
+// TestVoiceApproverListensAfterPlayback checks that capture never overlaps the
+// spoken prompt or tone, so speech during playback cannot be taken as a reply.
+func TestVoiceApproverListensAfterPlayback(t *testing.T) {
+	var events []string
+	var spoken, recorded []string
+	d := fakeApprovalDeps(t, []string{"um", "yes"}, &spoken, &recorded)
+	speak, capture := d.speak, d.capture
+	playing := false
+	d.speak = func(ctx context.Context, s string) error {
+		playing = true
+		events = append(events, "speak")
+		defer func() { playing = false }()
+		return speak(ctx, s)
+	}
+	d.tone = func(context.Context) error { events = append(events, "tone"); return nil }
+	d.capture = func(ctx context.Context, src string) (io.ReadCloser, func() error, error) {
+		if playing {
+			t.Error("capture started during playback")
+		}
+		events = append(events, "capture")
+		return capture(ctx, src)
+	}
+	a := &voiceApprover{cfg: voiceConfig{wakeWord: "hey agent", threshold: 0.018}, d: d, window: time.Second}
+	if !a.decide(context.Background(), voiceApprovalRequest{ToolName: "Write", Input: json.RawMessage(`{"file_path":"/tmp/a.txt"}`)}).Allow {
+		t.Fatal("want approve")
+	}
+	if got := strings.Join(events, ","); got != "speak,tone,capture,speak,tone,capture,speak" {
+		t.Fatalf("events %s", got)
+	}
+	if spoken[0] != "Approval needed: write a.txt. Say yes or no." {
+		t.Fatalf("prompt %q", spoken[0])
 	}
 }
 

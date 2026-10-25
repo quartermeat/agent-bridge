@@ -524,11 +524,14 @@ func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *v
 		if voiceFollowUpNoise(prompt) {
 			// Likely a Whisper hallucination or echo; leave the window open.
 			voiceLog(d, "voice transcription complete wake_match=false follow_up=false; follow-up noise ignored")
+			voiceRecord(d, "user", "ignored", transcript)
 			return nil
 		}
 	}
 	voiceLog(d, "voice transcription complete wake_match=%t follow_up=%t", wake, followUp)
 	if (!wake && !followUp) || prompt == "" {
+		// Dropped speech is still shown in the transcript so the user can see what the mic heard.
+		voiceRecord(d, "user", "ignored", transcript)
 		return nil
 	}
 	if state != nil {

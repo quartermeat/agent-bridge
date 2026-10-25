@@ -62,7 +62,7 @@ func TestVoiceTurnRecordsTranscript(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want := []string{"user/prompt/open the log", "system/status/Wake phrase heard; listening.", "system/status/Agent turn started.", "agent/reply/Done."}
+	want := []string{"user/ignored/background chatter", "user/prompt/open the log", "system/status/Wake phrase heard; listening.", "system/status/Agent turn started.", "agent/reply/Done."}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("recorded %q", got)
 	}
@@ -72,6 +72,9 @@ func TestFormatVoiceLogEntry(t *testing.T) {
 	ts := time.Date(2026, 10, 25, 9, 7, 0, 0, time.Local).Format(time.RFC3339)
 	cases := map[voiceTranscriptEntry]string{
 		{TS: ts, Role: "user", Kind: "prompt", Text: "hi"}:                        "09:07 you: hi",
+		{TS: ts, Role: "user", Kind: "ignored", Text: "tv noise"}:                 "09:07 (ignored) you: tv noise",
+		{TS: ts, Role: "user", Kind: "approval_heard", Text: "yeah"}:              "09:07 you (approval): yeah",
+		{TS: ts, Role: "system", Kind: "approval_verdict", Text: "approve"}:       "09:07 ⚠ approval: approve",
 		{TS: ts, Role: "agent", Kind: "reply", Text: "yo\x1b[2J"}:                 "09:07 agent: yo[2J",
 		{TS: ts, Role: "system", Kind: "approval_request", Text: "Bash: touch x"}: "09:07 ⚠ approval: Bash: touch x",
 		{TS: ts, Role: "system", Kind: "status", Text: "Agent turn started."}:     "09:07 ·: Agent turn started.",

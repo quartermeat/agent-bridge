@@ -232,7 +232,11 @@ func formatVoiceLogEntry(e voiceTranscriptEntry) string {
 	text = strings.ReplaceAll(text, "\n", "\n      ")
 	var who string
 	switch {
-	case e.Kind == "approval_request" || e.Kind == "approval_result":
+	case e.Kind == "ignored":
+		who = "(ignored) you"
+	case e.Kind == "approval_heard":
+		who = "you (approval)"
+	case e.Kind == "approval_request" || e.Kind == "approval_result" || e.Kind == "approval_verdict":
 		who = "⚠ approval"
 	case e.Kind == "error":
 		who = "! error"

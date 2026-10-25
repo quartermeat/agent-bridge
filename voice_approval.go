@@ -21,8 +21,10 @@ import (
 const (
 	voiceApprovalServer   = "voice_approval"
 	voiceApprovalTool     = "mcp__voice_approval__approve"
-	voiceApprovalWindow   = 20 * time.Second
+	voiceApprovalWindow   = 25 * time.Second
 	voiceApprovalAttempts = 2
+	voiceApprovalPrompt   = "Say yes or no."
+	voiceApprovalReprompt = "Sorry, yes or no?"
 	voiceApprovalMaxReq   = 1 << 20
 	// voiceApprovalWait bounds how long the MCP server waits for the daemon,
 	// including time queued behind another approval.
@@ -60,21 +62,35 @@ const (
 	voiceVerdictDeny
 )
 
+// Approval vocabulary, matched against the whole normalized utterance.
 var (
-	voiceApprovePhrases = map[string]bool{"approve": true, "approved": true, "yes approve": true, "confirm": true}
+	voiceApprovePhrases = voicePhraseSet("yes", "yeah", "yep", "yes please", "sure", "ok", "okay", "approve", "approved", "confirm", "confirmed", "do it", "go ahead", "go for it", "yes approve", "yes do it")
+	voiceDenyPhrases    = voicePhraseSet("no", "nope", "deny", "denied", "stop", "cancel", "don't", "do not")
 )
+
+func voicePhraseSet(phrases ...string) map[string]bool {
+	set := make(map[string]bool, len(phrases))
+	for _, p := range phrases {
+		set[normalizeVoicePhrase(p)] = true
+	}
+	return set
+}
 
 func normalizeVoicePhrase(text string) string {
 	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			return unicode.ToLower(r)
 		}
+		if r == '\'' || r == '’' {
+			return -1 // "don't" and "don’t" both become "dont"
+		}
 		return ' '
 	}, text)), " ")
 }
 
-// parseVoiceApproval approves only an exact approval phrase (optionally after the
-// wake phrase). Silence-like noise is unclear; any other speech denies.
+// parseVoiceApproval matches the whole utterance (optionally after a leading wake
+// phrase) against the approve and deny vocabularies. Noise and anything else,
+// including longer sentences that merely contain "yes", are unclear.
 func parseVoiceApproval(transcript, wake string) voiceApprovalVerdict {
 	if prompt, ok := stripLeadingWakeWord(transcript, wake); ok && strings.TrimSpace(wake) != "" {
 		transcript = prompt
@@ -82,14 +98,90 @@ func parseVoiceApproval(transcript, wake string) voiceApprovalVerdict {
 	if voiceFollowUpNoise(transcript) {
 		return voiceVerdictUnclear
 	}
-	// "deny", "no", "stop", "cancel" and every other phrase deny.
-	if voiceApprovePhrases[normalizeVoicePhrase(transcript)] {
+	phrase := normalizeVoicePhrase(transcript)
+	switch {
+	case voiceApprovePhrases[phrase]:
 		return voiceVerdictApprove
+	case voiceDenyPhrases[phrase]:
+		return voiceVerdictDeny
 	}
-	return voiceVerdictDeny
+	return voiceVerdictUnclear
 }
 
-// voiceApprovalSummary returns a short spoken summary and the full transcript detail.
+func (v voiceApprovalVerdict) String() string {
+	switch v {
+	case voiceVerdictApprove:
+		return "approve"
+	case voiceVerdictDeny:
+		return "deny"
+	}
+	return "unclear"
+}
+
+// voiceSpeakable keeps letters, digits, spaces and light punctuation so the spoken
+// summary never reads out code, quoting or shell operators.
+func voiceSpeakable(text string, maxWords int) string {
+	text = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), r == ' ', r == ',', r == '-', r == '\'', r == '.':
+			return r
+		}
+		return ' '
+	}, text)
+	words := strings.Fields(text)
+	if maxWords > 0 && len(words) > maxWords {
+		words = words[:maxWords]
+	}
+	return strings.Trim(strings.Join(words, " "), " .,-")
+}
+
+// voiceShellProgram returns the first program of a shell command (skipping
+// VAR=value assignments) as a bare name, or "" when it is not a plain word.
+func voiceShellProgram(cmd string) string {
+	for _, w := range strings.Fields(cmd) {
+		if strings.Contains(w, "=") && !strings.HasPrefix(w, "=") {
+			continue
+		}
+		name := filepath.Base(w)
+		for _, r := range name {
+			if !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.') {
+				return ""
+			}
+		}
+		if len(name) > 40 {
+			return ""
+		}
+		return name
+	}
+	return ""
+}
+
+// voiceHumanizeName turns "TodoWrite" or "do_thing" into "todo write" / "do thing".
+func voiceHumanizeName(name string) string {
+	var b strings.Builder
+	prevLower := false
+	for _, r := range name {
+		switch {
+		case r == '_' || r == '-' || r == ' ':
+			b.WriteRune(' ')
+			prevLower = false
+			continue
+		case unicode.IsUpper(r):
+			if prevLower {
+				b.WriteRune(' ')
+			}
+			b.WriteRune(unicode.ToLower(r))
+			prevLower = false
+			continue
+		}
+		b.WriteRune(r)
+		prevLower = unicode.IsLetter(r) || unicode.IsDigit(r)
+	}
+	return voiceSpeakable(b.String(), 8)
+}
+
+// voiceApprovalSummary returns a short plain-language spoken summary (never raw
+// code) and the full transcript detail.
 func voiceApprovalSummary(req voiceApprovalRequest) (spoken, detail string) {
 	var in map[string]any
 	_ = json.Unmarshal(req.Input, &in)
@@ -100,31 +192,33 @@ func voiceApprovalSummary(req voiceApprovalRequest) (spoken, detail string) {
 	switch req.ToolName {
 	case "Bash":
 		cmd := str("command")
-		words := strings.Fields(cmd)
-		if len(words) > 12 {
-			words = append(words[:12], "and more")
+		detail = "Bash: " + cmd
+		if d := voiceSpeakable(str("description"), 20); d != "" {
+			return d, detail
 		}
-		return "Run command: " + strings.Join(words, " "), "Bash: " + cmd
+		if prog := voiceSpeakable(voiceShellProgram(cmd), 1); prog != "" {
+			return "run a shell command, " + prog, detail
+		}
+		return "run a shell command", detail
 	case "Edit", "MultiEdit", "NotebookEdit":
 		p := str("file_path")
 		if p == "" {
 			p = str("notebook_path")
 		}
-		return "Edit file " + filepath.Base(p), req.ToolName + ": " + p
+		return voiceFileSummary("edit", p), req.ToolName + ": " + p
 	case "Write":
-		return "Write file " + filepath.Base(str("file_path")), "Write: " + str("file_path")
+		return voiceFileSummary("write", str("file_path")), "Write: " + str("file_path")
 	case "WebFetch":
-		host := str("url")
-		if u, err := url.Parse(host); err == nil && u.Host != "" {
-			host = u.Host
+		host := ""
+		if u, err := url.Parse(str("url")); err == nil {
+			host = u.Hostname()
 		}
-		return "Fetch " + host, "WebFetch: " + str("url")
+		if host = voiceSpeakable(host, 1); host == "" {
+			return "fetch a web page", "WebFetch: " + str("url")
+		}
+		return "fetch " + host, "WebFetch: " + str("url")
 	case "WebSearch":
-		words := strings.Fields(str("query"))
-		if len(words) > 12 {
-			words = words[:12]
-		}
-		return "Search the web for " + strings.Join(words, " "), "WebSearch: " + str("query")
+		return "search the web for " + voiceSpeakable(str("query"), 12), "WebSearch: " + str("query")
 	}
 	raw := string(req.Input)
 	if len(raw) > 2000 {
@@ -132,9 +226,17 @@ func voiceApprovalSummary(req voiceApprovalRequest) (spoken, detail string) {
 	}
 	name := req.ToolName
 	if parts := strings.SplitN(name, "__", 3); len(parts) == 3 && parts[0] == "mcp" {
-		return "Use tool " + strings.ReplaceAll(parts[2], "_", " ") + " from " + strings.ReplaceAll(parts[1], "_", " "), name + ": " + raw
+		return "use " + voiceHumanizeName(parts[2]) + " from " + voiceHumanizeName(parts[1]), name + ": " + raw
 	}
-	return "Use tool " + name, name + ": " + raw
+	return "use " + voiceHumanizeName(name), name + ": " + raw
+}
+
+func voiceFileSummary(verb, path string) string {
+	name := voiceSpeakable(filepath.Base(path), 6)
+	if path == "" || name == "" {
+		return verb + " a file"
+	}
+	return verb + " " + name
 }
 
 // voiceApprover asks for spoken approval. It runs while the main loop is blocked
@@ -169,11 +271,20 @@ func (a *voiceApprover) decide(ctx context.Context, req voiceApprovalRequest) vo
 	return voiceApprovalDecision{Allow: allow, Message: msg}
 }
 
+// voiceApprovalSpeech is the full spoken approval prompt.
+func voiceApprovalSpeech(spoken string) string {
+	if spoken == "" {
+		spoken = "an action"
+	}
+	return "Approval needed: " + spoken + ". " + voiceApprovalPrompt
+}
+
+// listen speaks the prompt, then listens. Capture starts only after the prompt
+// (and tone) finish playing, so speech that began during playback is never heard.
+// One unclear reply gets "Sorry, yes or no?"; a second unclear reply, silence,
+// an error, or the end of the window denies.
 func (a *voiceApprover) listen(ctx context.Context, spoken string) bool {
 	if a.d.speak == nil || a.d.capture == nil || a.d.transcribe == nil {
-		return false
-	}
-	if err := a.d.speak(ctx, "Approval needed. "+spoken+". Say approve or deny."); err != nil {
 		return false
 	}
 	window := a.window
@@ -182,15 +293,31 @@ func (a *voiceApprover) listen(ctx context.Context, spoken string) bool {
 	}
 	ctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
-	if a.d.tone != nil {
-		_ = a.d.tone(ctx)
-	}
+	prompt := voiceApprovalSpeech(spoken)
 	for i := 0; i < voiceApprovalAttempts; i++ {
-		text, err := a.hear(ctx)
-		if err != nil {
+		if i > 0 {
+			prompt = voiceApprovalReprompt
+		}
+		if err := a.d.speak(ctx, prompt); err != nil {
+			voiceRecord(a.d, "system", "approval_verdict", "deny (prompt playback failed)")
 			return false
 		}
-		switch parseVoiceApproval(text, a.cfg.wakeWord) {
+		if a.d.tone != nil {
+			_ = a.d.tone(ctx)
+		}
+		text, err := a.hear(ctx)
+		if err != nil {
+			voiceRecord(a.d, "system", "approval_verdict", "deny (nothing heard in time)")
+			return false
+		}
+		verdict := parseVoiceApproval(text, a.cfg.wakeWord)
+		heard := strings.TrimSpace(text)
+		if heard == "" {
+			heard = "(silence)"
+		}
+		voiceRecord(a.d, "user", "approval_heard", heard)
+		voiceRecord(a.d, "system", "approval_verdict", verdict.String())
+		switch verdict {
 		case voiceVerdictApprove:
 			return true
 		case voiceVerdictDeny:
