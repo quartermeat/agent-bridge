@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Bridge local voice conversation
+Wants=pipewire.service pipewire-pulse.service
+After=graphical-session.target pipewire.service pipewire-pulse.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+# Voice requests have read-only Codex access. Journal RMS readings help tune --vad-threshold.
+ExecStart=%h/.local/bin/agent-bridge voice --source alsa_input.usb-046d_Brio_1080p_Webcam_2504CG900U08-02.mono-fallback --wake-word "hey agent"
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=graphical-session.target
