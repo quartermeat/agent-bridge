@@ -24,7 +24,13 @@ import (
 const (
 	voiceRate           = 16000
 	voiceFrameSamples   = 320
-	voiceMaxDuration    = 12 * time.Second
+	voiceFrameDuration  = 20 * time.Millisecond
+	voicePrerollFrames  = 10
+	voiceMaxDuration    = 30 * time.Second
+	voiceMinUtterance   = 2 * time.Second
+	voiceMaxUtterance   = 60 * time.Second
+	voiceFollowUp       = 20 * time.Second
+	voiceMaxFollowUp    = 120 * time.Second
 	voiceMaxTranscript  = 2048
 	voiceMaxReply       = 700
 	voiceMaxSpokenReply = 4200
@@ -63,7 +69,28 @@ func voiceProcessFailure(code string, err error) error {
 type voiceConfig struct {
 	source, wakeWord, file string
 	threshold              float64
+	// maxUtterance caps captured speech including pre-roll; zero means voiceMaxDuration.
+	maxUtterance time.Duration
+	// followUp accepts utterances without the wake phrase for this long after a reply; zero disables.
+	followUp time.Duration
 }
+
+// voiceFollowUpState tracks when the wake-word-free follow-up window closes.
+type voiceFollowUpState struct{ until time.Time }
+
+// voiceMaxFrames is the frame budget for an utterance, pre-roll included.
+func voiceMaxFrames(limit time.Duration) int {
+	if limit <= 0 {
+		limit = voiceMaxDuration
+	}
+	return int(limit / voiceFrameDuration)
+}
+
+// voiceMaxBytes is the PCM byte limit shared by capture and the WAV checks.
+func voiceMaxBytes(limit time.Duration) int {
+	return voiceMaxFrames(limit) * voiceFrameSamples * 2
+}
+
 type voiceDeps struct {
 	capture    func(context.Context, string) (io.ReadCloser, func() error, error)
 	transcribe func(context.Context, string) (string, error)
@@ -73,6 +100,14 @@ type voiceDeps struct {
 	logf       func(string, ...any)
 	pause      func(context.Context, time.Duration) error
 	observe    func(float64, bool)
+	now        func() time.Time
+}
+
+func voiceNow(d voiceDeps) time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
 }
 
 func voiceCommand(args []string) error {
@@ -83,13 +118,16 @@ func voiceCommand(args []string) error {
 	file := f.String("file", "", "Transcribe one existing WAV file and exit")
 	agentName := f.String("agent", "claude", "Reply backend: claude or codex")
 	speechGain := f.Float64("speech-gain", defaultSpeechGain, "Speech gain in dB passed to speak, -20 to 20")
+	maxUtterance := f.Duration("max-utterance", voiceMaxDuration, "Longest captured utterance, 2s to 60s")
+	followUp := f.Duration("follow-up", voiceFollowUp, "Accept replies without the wake phrase for this long after speaking; 0 disables, max 120s")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if f.NArg() != 0 || *source == "" || math.IsNaN(*threshold) || *threshold <= 0 || *threshold >= 1 || (*agentName != "claude" && *agentName != "codex") || !validSpeechGain(*speechGain) {
-		return errors.New("usage: agent-bridge voice [--agent claude|codex] [--source NAME] [--wake-word PHRASE] [--vad-threshold 0.018] [--speech-gain 6] [--file WAV]")
+	if f.NArg() != 0 || *source == "" || math.IsNaN(*threshold) || *threshold <= 0 || *threshold >= 1 || (*agentName != "claude" && *agentName != "codex") || !validSpeechGain(*speechGain) ||
+		*maxUtterance < voiceMinUtterance || *maxUtterance > voiceMaxUtterance || *followUp < 0 || *followUp > voiceMaxFollowUp {
+		return errors.New("usage: agent-bridge voice [--agent claude|codex] [--source NAME] [--wake-word PHRASE] [--vad-threshold 0.018] [--speech-gain 6] [--max-utterance 30s] [--follow-up 20s] [--file WAV]")
 	}
-	cfg := voiceConfig{source: *source, wakeWord: *wake, file: *file, threshold: *threshold}
+	cfg := voiceConfig{source: *source, wakeWord: *wake, file: *file, threshold: *threshold, maxUtterance: *maxUtterance, followUp: *followUp}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	d := realVoiceDeps(*agentName, *speechGain)
@@ -148,32 +186,39 @@ func startVoiceCapture(ctx context.Context, source string) (io.ReadCloser, func(
 
 // readVoiceUtterance keeps a short pre-roll and closes an utterance after quiet frames.
 func readVoiceUtterance(ctx context.Context, input io.Reader, threshold float64) ([]byte, error) {
-	return readVoiceUtteranceObserved(ctx, input, threshold, nil)
+	pcm, _, err := readVoiceUtteranceObserved(ctx, input, threshold, 0, nil)
+	return pcm, err
 }
-func readVoiceUtteranceObserved(ctx context.Context, input io.Reader, threshold float64, observe func(float64, bool)) ([]byte, error) {
+
+// readVoiceUtteranceObserved returns one utterance of at most voiceMaxBytes(limit) bytes,
+// pre-roll included, and reports whether it was cut at that cap.
+func readVoiceUtteranceObserved(ctx context.Context, input io.Reader, threshold float64, limit time.Duration, observe func(float64, bool)) ([]byte, bool, error) {
 	frame := make([]byte, voiceFrameSamples*2)
-	preroll := make([][]byte, 0, 10)
+	// preroll is a fixed ring; reslicing it would shrink capacity and let it grow without bound in silence.
+	preroll := make([][]byte, 0, voicePrerollFrames)
 	var utterance []byte
 	speechFrames, quietFrames := 0, 0
-	maxFrames := int(voiceMaxDuration / (20 * time.Millisecond))
+	maxBytes := voiceMaxBytes(limit)
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		_, err := io.ReadFull(input, frame)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return nil, io.EOF
+				return nil, false, io.EOF
 			}
-			return nil, err
+			return nil, false, err
 		}
 		level := voiceEnergy(frame)
 		active := level >= threshold
 		if len(utterance) == 0 {
-			if len(preroll) == cap(preroll) {
-				preroll = preroll[1:]
+			if len(preroll) == voicePrerollFrames {
+				copy(preroll, preroll[1:])
+				preroll[len(preroll)-1] = bytes.Clone(frame)
+			} else {
+				preroll = append(preroll, bytes.Clone(frame))
 			}
-			preroll = append(preroll, bytes.Clone(frame))
 			if active {
 				speechFrames++
 			} else {
@@ -185,6 +230,12 @@ func readVoiceUtteranceObserved(ctx context.Context, input io.Reader, threshold 
 				}
 				for _, p := range preroll {
 					utterance = append(utterance, p...)
+				}
+				if len(utterance) > maxBytes {
+					utterance = utterance[len(utterance)-maxBytes:]
+				}
+				if len(utterance) >= maxBytes {
+					return utterance, true, nil
 				}
 				quietFrames = 0
 			}
@@ -202,8 +253,11 @@ func readVoiceUtteranceObserved(ctx context.Context, input io.Reader, threshold 
 		} else {
 			quietFrames++
 		}
-		if quietFrames >= 35 || len(utterance) >= maxFrames*len(frame) {
-			return utterance, nil
+		if len(utterance) >= maxBytes {
+			return utterance[:maxBytes], true, nil
+		}
+		if quietFrames >= 35 {
+			return utterance, false, nil
 		}
 	}
 }
@@ -216,14 +270,14 @@ func voiceEnergy(frame []byte) float64 {
 	return math.Sqrt(sum / float64(len(frame)/2))
 }
 
-func captureVoiceUtterance(ctx context.Context, d voiceDeps, source string, threshold float64) ([]byte, error) {
+func captureVoiceUtterance(ctx context.Context, d voiceDeps, source string, threshold float64, limit time.Duration) ([]byte, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 	input, wait, err := d.capture(captureCtx, source)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	pcm, readErr := readVoiceUtteranceObserved(captureCtx, input, threshold, d.observe)
+	pcm, capped, readErr := readVoiceUtteranceObserved(captureCtx, input, threshold, limit, d.observe)
 	cancel()
 	_ = input.Close()
 	waitErr := wait()
@@ -239,14 +293,18 @@ func captureVoiceUtterance(ctx context.Context, d voiceDeps, source string, thre
 		}
 		return nil, voiceFailure{code: "capture read failed"}
 	}
+	if capped {
+		voiceLog(d, "voice utterance hit length cap")
+	}
 	return pcm, nil
 }
 
 func runVoice(ctx context.Context, cfg voiceConfig, d voiceDeps) error {
 	failures := 0
 	lastFeedback := time.Time{}
+	followUp := &voiceFollowUpState{}
 	for ctx.Err() == nil {
-		pcm, err := captureVoiceUtterance(ctx, d, cfg.source, cfg.threshold)
+		pcm, err := captureVoiceUtterance(ctx, d, cfg.source, cfg.threshold, cfg.maxUtterance)
 		if ctx.Err() != nil {
 			break
 		}
@@ -264,7 +322,9 @@ func runVoice(ctx context.Context, cfg voiceConfig, d voiceDeps) error {
 			continue
 		}
 		failures = 0
-		if err = handleVoicePCM(ctx, cfg, d, pcm); err != nil && ctx.Err() == nil {
+		// The follow-up window is judged by when speech began, not when transcription ends.
+		startedAt := voiceNow(d).Add(-time.Duration(len(pcm)/2) * time.Second / voiceRate)
+		if err = handleVoicePCMTurn(ctx, cfg, d, followUp, startedAt, pcm); err != nil && ctx.Err() == nil {
 			d.logf("voice %s", voiceDiagnostic(err))
 			message := "Voice request failed. Check the service journal."
 			var failure voiceFailure
@@ -307,13 +367,16 @@ func voiceFailureFeedback(ctx context.Context, d voiceDeps, last *time.Time, mes
 	}
 }
 func handleVoicePCM(ctx context.Context, cfg voiceConfig, d voiceDeps, pcm []byte) error {
+	return handleVoicePCMTurn(ctx, cfg, d, nil, time.Time{}, pcm)
+}
+func handleVoicePCMTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *voiceFollowUpState, startedAt time.Time, pcm []byte) error {
 	dir, err := os.MkdirTemp("", "agent-bridge-voice-")
 	if err != nil {
 		return voiceFailure{code: "private audio directory failed"}
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "utterance.wav")
-	if err = writeVoiceWAV(path, pcm); err != nil {
+	if err = writeVoiceWAVLimit(path, pcm, cfg.maxUtterance); err != nil {
 		return err
 	}
 	transcript, err := d.transcribe(ctx, path)
@@ -326,10 +389,11 @@ func handleVoicePCM(ctx context.Context, cfg voiceConfig, d voiceDeps, pcm []byt
 		}
 		return voiceProcessFailure("transcription failed", err)
 	}
-	return handleVoiceText(ctx, cfg, d, transcript)
+	return handleVoiceTurn(ctx, cfg, d, state, startedAt, transcript)
 }
-func writeVoiceWAV(path string, pcm []byte) error {
-	if len(pcm) > voiceRate*2*int(voiceMaxDuration/time.Second) {
+func writeVoiceWAV(path string, pcm []byte) error { return writeVoiceWAVLimit(path, pcm, 0) }
+func writeVoiceWAVLimit(path string, pcm []byte, limit time.Duration) error {
+	if len(pcm) > voiceMaxBytes(limit) {
 		return voiceFailure{code: "audio too long"}
 	}
 	if len(pcm) == 0 || len(pcm)%2 != 0 {
@@ -369,7 +433,7 @@ func runVoiceFile(ctx context.Context, cfg voiceConfig, d voiceDeps) error {
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() < 44 || st.Size() > int64(voiceRate*2*int(voiceMaxDuration/time.Second)+4096) {
+	if err != nil || !st.Mode().IsRegular() || st.Size() < 44 || st.Size() > int64(voiceMaxBytes(cfg.maxUtterance)+4096) {
 		return voiceFailure{code: "invalid or oversized WAV file"}
 	}
 	header := make([]byte, 12)
@@ -388,6 +452,12 @@ func runVoiceFile(ctx context.Context, cfg voiceConfig, d voiceDeps) error {
 	return handleVoiceText(ctx, cfg, d, transcript)
 }
 func handleVoiceText(ctx context.Context, cfg voiceConfig, d voiceDeps, transcript string) error {
+	return handleVoiceTurn(ctx, cfg, d, nil, time.Time{}, transcript)
+}
+
+// handleVoiceTurn gates a transcript on the wake phrase or an open follow-up window.
+// A nil state disables follow-ups. Logs carry only booleans, never transcript text.
+func handleVoiceTurn(ctx context.Context, cfg voiceConfig, d voiceDeps, state *voiceFollowUpState, startedAt time.Time, transcript string) error {
 	if len(transcript) > voiceMaxTranscript || !utf8.ValidString(transcript) {
 		return voiceFailure{code: "transcript invalid or too long"}
 	}
@@ -395,16 +465,32 @@ func handleVoiceText(ctx context.Context, cfg voiceConfig, d voiceDeps, transcri
 		voiceLog(d, "voice transcription empty; ignored")
 		return nil
 	}
-	prompt, ok := stripWakeWord(transcript, cfg.wakeWord)
-	voiceLog(d, "voice transcription complete wake_match=%t", ok)
-	if !ok || prompt == "" {
+	prompt, wake := stripWakeWord(transcript, cfg.wakeWord)
+	inWindow := state != nil && cfg.followUp > 0 && !state.until.IsZero() && !startedAt.After(state.until)
+	followUp := inWindow && (!wake || prompt != "")
+	if followUp && !wake {
+		prompt = strings.TrimSpace(transcript)
+		if len(strings.Fields(prompt)) < 2 {
+			// Too short to be a request; leave the window open.
+			voiceLog(d, "voice transcription complete wake_match=false follow_up=false; short follow-up ignored")
+			return nil
+		}
+	}
+	voiceLog(d, "voice transcription complete wake_match=%t follow_up=%t", wake, followUp)
+	if (!wake && !followUp) || prompt == "" {
 		return nil
 	}
-	voiceLog(d, "voice acknowledgement playback start")
-	if err := d.speak(ctx, "I'm listening."); err != nil {
-		return voiceProcessFailure("acknowledgement playback failed", err)
+	if state != nil {
+		// Accepted turns consume the window; only a completed reply reopens it.
+		state.until = time.Time{}
 	}
-	voiceLog(d, "voice acknowledgement playback complete")
+	if !followUp {
+		voiceLog(d, "voice acknowledgement playback start")
+		if err := d.speak(ctx, "I'm listening."); err != nil {
+			return voiceProcessFailure("acknowledgement playback failed", err)
+		}
+		voiceLog(d, "voice acknowledgement playback complete")
+	}
 	voiceLog(d, "voice agent turn start")
 	reply, err := d.reply(ctx, prompt)
 	if err != nil {
@@ -422,6 +508,10 @@ func handleVoiceText(ctx context.Context, cfg voiceConfig, d voiceDeps, transcri
 		}
 	}
 	voiceLog(d, "voice speech playback complete")
+	if state != nil && cfg.followUp > 0 {
+		state.until = voiceNow(d).Add(cfg.followUp)
+		voiceLog(d, "voice follow-up window open")
+	}
 	return nil
 }
 func voiceReplyChunks(reply string) []string {

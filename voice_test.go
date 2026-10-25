@@ -35,9 +35,9 @@ func TestVoiceUtteranceBoundaries(t *testing.T) {
 	if err != io.EOF || rest != nil {
 		t.Fatalf("second utterance: %d bytes, %v", len(rest), err)
 	}
-	long := testVoicePCM(4000, 800)
+	long := testVoicePCM(4000, 1600)
 	got, err = readVoiceUtterance(context.Background(), bytes.NewReader(long), 0.018)
-	if err != nil || len(got) > voiceRate*2*int(voiceMaxDuration/time.Second) {
+	if err != nil || len(got) > voiceMaxBytes(0) {
 		t.Fatalf("duration bound: %d bytes, %v", len(got), err)
 	}
 }
@@ -94,7 +94,7 @@ func TestVoiceQuietSpeechThreshold(t *testing.T) {
 	input := append(testVoicePCM(66, 10), testVoicePCM(328, 4)...)
 	input = append(input, testVoicePCM(66, 35)...)
 	triggered := 0
-	pcm, err := readVoiceUtteranceObserved(context.Background(), bytes.NewReader(input), 0.006, func(_ float64, trigger bool) {
+	pcm, _, err := readVoiceUtteranceObserved(context.Background(), bytes.NewReader(input), 0.006, 0, func(_ float64, trigger bool) {
 		if trigger {
 			triggered++
 		}
@@ -176,7 +176,7 @@ func TestVoiceCaptureFailureAndCancellation(t *testing.T) {
 	d.capture = func(context.Context, string) (io.ReadCloser, func() error, error) {
 		return io.NopCloser(bytes.NewReader(append(testVoicePCM(4000, 5), testVoicePCM(0, 35)...))), func() error { waited = true; return nil }, nil
 	}
-	pcm, err := captureVoiceUtterance(context.Background(), d, "fake", 0.018)
+	pcm, err := captureVoiceUtterance(context.Background(), d, "fake", 0.018, 0)
 	if err != nil || len(pcm) == 0 || !waited {
 		t.Fatalf("capture cleanup: %d bytes, %v, waited=%v", len(pcm), err, waited)
 	}
@@ -221,7 +221,7 @@ func TestVoiceLevelTriggerAndFeedback(t *testing.T) {
 	input = append(input, testVoicePCM(0, 35)...)
 	triggered := 0
 	levels := 0
-	_, err := readVoiceUtteranceObserved(context.Background(), bytes.NewReader(input), 0.018, func(level float64, trigger bool) {
+	_, _, err := readVoiceUtteranceObserved(context.Background(), bytes.NewReader(input), 0.018, 0, func(level float64, trigger bool) {
 		levels++
 		if trigger {
 			triggered++
@@ -324,5 +324,156 @@ func TestVoiceDiagnosticClassification(t *testing.T) {
 	}
 	if err := writeVoiceWAV(filepath.Join(t.TempDir(), "bad.wav"), []byte{1}); voiceDiagnostic(err) != "invalid audio" {
 		t.Fatal(err)
+	}
+}
+
+func TestVoiceUtteranceCapIncludesPreroll(t *testing.T) {
+	limit := 2 * time.Second
+	// Minutes of silence must not grow the pre-roll past its ring size.
+	input := append(testVoicePCM(0, 6000), testVoicePCM(4000, 400)...)
+	pcm, capped, err := readVoiceUtteranceObserved(context.Background(), bytes.NewReader(input), 0.018, limit, nil)
+	if err != nil || !capped || len(pcm) != voiceMaxBytes(limit) {
+		t.Fatalf("cap: %d bytes capped=%t %v; want %d", len(pcm), capped, err, voiceMaxBytes(limit))
+	}
+	silent := bytes.Count(pcm, testVoiceFrame(0))
+	if silent > voicePrerollFrames {
+		t.Fatalf("pre-roll grew to %d silent frames", silent)
+	}
+	short := append(testVoicePCM(0, 3000), testVoicePCM(4000, 10)...)
+	short = append(short, testVoicePCM(0, 35)...)
+	pcm, capped, err = readVoiceUtteranceObserved(context.Background(), bytes.NewReader(short), 0.018, limit, nil)
+	if err != nil || capped || len(pcm) != (voicePrerollFrames-3+10+35)*voiceFrameSamples*2 {
+		t.Fatalf("short after silence: %d bytes capped=%t %v", len(pcm), capped, err)
+	}
+}
+
+func TestVoiceUtteranceAtCapIsProcessed(t *testing.T) {
+	var logs []string
+	transcribed := false
+	d := voiceDeps{
+		capture: func(context.Context, string) (io.ReadCloser, func() error, error) {
+			input := append(testVoicePCM(0, 500), testVoicePCM(4000, 3000)...)
+			return io.NopCloser(bytes.NewReader(input)), func() error { return nil }, nil
+		},
+		transcribe: func(context.Context, string) (string, error) {
+			transcribed = true
+			return "hey agent long question", nil
+		},
+		reply: func(context.Context, string) (string, error) { return "answer", nil },
+		speak: func(context.Context, string) error { return nil },
+		logf:  func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	}
+	cfg := voiceConfig{wakeWord: "hey agent", maxUtterance: 2 * time.Second}
+	pcm, err := captureVoiceUtterance(context.Background(), d, "fake", 0.018, cfg.maxUtterance)
+	if err != nil || len(pcm) != voiceMaxBytes(cfg.maxUtterance) {
+		t.Fatalf("capture: %d bytes %v", len(pcm), err)
+	}
+	if err = handleVoicePCM(context.Background(), cfg, d, pcm); err != nil || !transcribed {
+		t.Fatalf("capped utterance dropped: %v transcribed=%t", err, transcribed)
+	}
+	if !strings.Contains(strings.Join(logs, "|"), "voice utterance hit length cap") {
+		t.Fatal(logs)
+	}
+	if err = writeVoiceWAVLimit(filepath.Join(t.TempDir(), "x.wav"), append(pcm, 0, 0), cfg.maxUtterance); voiceDiagnostic(err) != "audio too long" {
+		t.Fatalf("over cap: %v", err)
+	}
+}
+
+type voiceFollowUpHarness struct {
+	now     time.Time
+	prompts []string
+	spoken  []string
+	logs    []string
+	d       voiceDeps
+	state   voiceFollowUpState
+}
+
+func newVoiceFollowUpHarness() *voiceFollowUpHarness {
+	h := &voiceFollowUpHarness{now: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
+	h.d = voiceDeps{
+		reply: func(_ context.Context, p string) (string, error) {
+			h.prompts = append(h.prompts, p)
+			return "answer", nil
+		},
+		speak: func(_ context.Context, s string) error { h.spoken = append(h.spoken, s); return nil },
+		logf:  func(format string, args ...any) { h.logs = append(h.logs, fmt.Sprintf(format, args...)) },
+		now:   func() time.Time { return h.now },
+	}
+	return h
+}
+func (h *voiceFollowUpHarness) say(t *testing.T, cfg voiceConfig, text string) {
+	t.Helper()
+	if err := handleVoiceTurn(context.Background(), cfg, h.d, &h.state, h.now, text); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVoiceFollowUpWindow(t *testing.T) {
+	cfg := voiceConfig{wakeWord: "hey agent", followUp: 20 * time.Second}
+	h := newVoiceFollowUpHarness()
+	h.say(t, cfg, "what is the weather")
+	if len(h.prompts) != 0 {
+		t.Fatal("accepted without wake word before any reply")
+	}
+	h.say(t, cfg, "Hey agent, first question")
+	if got := strings.Join(h.spoken, "|"); got != "I'm listening.|answer" {
+		t.Fatal(got)
+	}
+	h.now = h.now.Add(10 * time.Second)
+	h.spoken = nil
+	h.say(t, cfg, "okay") // too short: ignored, window kept
+	h.say(t, cfg, "and a second question")
+	if len(h.prompts) != 2 || h.prompts[1] != "and a second question" {
+		t.Fatal(h.prompts)
+	}
+	if got := strings.Join(h.spoken, "|"); got != "answer" {
+		t.Fatalf("follow-up acknowledged: %s", got)
+	}
+	h.now = h.now.Add(19 * time.Second) // window reset by the last reply
+	h.say(t, cfg, "hey agent third one please")
+	if len(h.prompts) != 3 || h.prompts[2] != "third one please" {
+		t.Fatal(h.prompts)
+	}
+	h.now = h.now.Add(21 * time.Second)
+	h.say(t, cfg, "too late for this one")
+	if len(h.prompts) != 3 {
+		t.Fatal("accepted after the window closed")
+	}
+	logs := strings.Join(h.logs, "|")
+	if !strings.Contains(logs, "wake_match=false follow_up=true") || !strings.Contains(logs, "wake_match=true follow_up=false") {
+		t.Fatal(logs)
+	}
+	for _, private := range []string{"question", "late", "third"} {
+		if strings.Contains(logs, private) {
+			t.Fatalf("transcript logged: %s", logs)
+		}
+	}
+}
+
+func TestVoiceFollowUpDisabledAndFailureClosesWindow(t *testing.T) {
+	h := newVoiceFollowUpHarness()
+	cfg := voiceConfig{wakeWord: "hey agent"}
+	h.say(t, cfg, "hey agent first question")
+	h.now = h.now.Add(time.Second)
+	h.say(t, cfg, "a follow-up question")
+	if len(h.prompts) != 1 || !h.state.until.IsZero() {
+		t.Fatalf("disabled follow-up: %v until=%v", h.prompts, h.state.until)
+	}
+	cfg.followUp = 20 * time.Second
+	h.say(t, cfg, "hey agent first question")
+	h.d.reply = func(context.Context, string) (string, error) { return "", errors.New("down") }
+	if err := handleVoiceTurn(context.Background(), cfg, h.d, &h.state, h.now, "this one fails"); err == nil {
+		t.Fatal("expected agent failure")
+	}
+	if !h.state.until.IsZero() {
+		t.Fatal("failed reply left the window open")
+	}
+}
+
+func TestVoiceDurationFlagBounds(t *testing.T) {
+	for _, args := range [][]string{{"--max-utterance", "1s"}, {"--max-utterance", "61s"}, {"--follow-up", "-1s"}, {"--follow-up", "121s"}} {
+		if err := voiceCommand(args); err == nil || !strings.Contains(err.Error(), "usage") {
+			t.Fatalf("%v: %v", args, err)
+		}
 	}
 }
