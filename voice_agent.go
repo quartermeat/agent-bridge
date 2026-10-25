@@ -301,30 +301,7 @@ func (a *voiceAgent) connect(ctx context.Context) error {
 	return nil
 }
 func (a *voiceAgent) saveThreadID() error {
-	if a.statePath == "" {
-		return nil
-	}
-	dir := filepath.Dir(a.statePath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".thread-id-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err = tmp.Chmod(0600); err == nil {
-		_, err = tmp.WriteString(a.threadID + "\n")
-	}
-	if err == nil {
-		err = tmp.Close()
-	} else {
-		_ = tmp.Close()
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), a.statePath)
+	return saveVoiceStateID(a.statePath, ".thread-id-", a.threadID)
 }
 func (a *voiceAgent) Reply(ctx context.Context, transcript string) (string, error) {
 	a.mu.Lock()
@@ -385,11 +362,14 @@ func (a *voiceAgent) Reply(ctx context.Context, transcript string) (string, erro
 				Turn     struct {
 					ID     string `json:"id"`
 					Status string `json:"status"`
+					Error  struct {
+						CodexErrorInfo json.RawMessage `json:"codexErrorInfo"`
+					} `json:"error"`
 				} `json:"turn"`
 			}
 			if json.Unmarshal(m.Params, &p) == nil && p.ThreadID == a.threadID && p.Turn.ID == started.Turn.ID {
 				if p.Turn.Status != "completed" {
-					return "", voiceFailure{code: "agent turn failed"}
+					return "", codexTurnFailure(p.Turn.Error.CodexErrorInfo)
 				}
 				if strings.TrimSpace(final) == "" {
 					return "", voiceFailure{code: "agent returned no final message"}
@@ -398,4 +378,22 @@ func (a *voiceAgent) Reply(ctx context.Context, transcript string) (string, erro
 			}
 		}
 	}
+}
+
+// codexTurnFailure maps codexErrorInfo to a fixed label. Unit variants arrive as a
+// string and data variants as a single-key object; server message text is ignored.
+func codexTurnFailure(info json.RawMessage) error {
+	var name string
+	if json.Unmarshal(info, &name) != nil {
+		var variant map[string]json.RawMessage
+		if json.Unmarshal(info, &variant) == nil && len(variant) == 1 {
+			for k := range variant {
+				name = k
+			}
+		}
+	}
+	if name == "usageLimitExceeded" {
+		return voiceFailure{code: "agent usage limit reached"}
+	}
+	return voiceFailure{code: "agent turn failed"}
 }

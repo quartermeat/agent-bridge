@@ -81,16 +81,17 @@ func voiceCommand(args []string) error {
 	wake := f.String("wake-word", "hey agent", "Wake phrase; empty accepts every utterance")
 	threshold := f.Float64("vad-threshold", 0.018, "RMS speech threshold from 0 to 1")
 	file := f.String("file", "", "Transcribe one existing WAV file and exit")
+	agentName := f.String("agent", "claude", "Reply backend: claude or codex")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if f.NArg() != 0 || *source == "" || math.IsNaN(*threshold) || *threshold <= 0 || *threshold >= 1 {
-		return errors.New("usage: agent-bridge voice [--source NAME] [--wake-word PHRASE] [--vad-threshold 0.018] [--file WAV]")
+	if f.NArg() != 0 || *source == "" || math.IsNaN(*threshold) || *threshold <= 0 || *threshold >= 1 || (*agentName != "claude" && *agentName != "codex") {
+		return errors.New("usage: agent-bridge voice [--agent claude|codex] [--source NAME] [--wake-word PHRASE] [--vad-threshold 0.018] [--file WAV]")
 	}
 	cfg := voiceConfig{source: *source, wakeWord: *wake, file: *file, threshold: *threshold}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	d := realVoiceDeps()
+	d := realVoiceDeps(*agentName)
 	defer d.close()
 	if cfg.file != "" {
 		return runVoiceFile(ctx, cfg, d)
@@ -98,8 +99,16 @@ func voiceCommand(args []string) error {
 	return runVoice(ctx, cfg, d)
 }
 
-func realVoiceDeps() voiceDeps {
-	agent := newVoiceAgent()
+type voiceReplier interface {
+	Reply(context.Context, string) (string, error)
+	Close() error
+}
+
+func realVoiceDeps(agentName string) voiceDeps {
+	var agent voiceReplier = newVoiceClaude()
+	if agentName == "codex" {
+		agent = newVoiceAgent()
+	}
 	lastLevel := time.Time{}
 	return voiceDeps{capture: startVoiceCapture, transcribe: transcribeVoice, reply: agent.Reply, close: agent.Close, speak: speakVoice, logf: log.Printf, pause: voicePause,
 		observe: func(level float64, trigger bool) {
@@ -512,10 +521,8 @@ func limitedCommandOutput(cmd *exec.Cmd, limit int64) ([]byte, error) {
 		_ = cmd.Wait()
 		return nil, err
 	}
-	if err = cmd.Wait(); err != nil {
-		return nil, err
-	}
-	return b, nil
+	// Output is returned with a non-zero exit so callers can read a structured error.
+	return b, cmd.Wait()
 }
 func speakVoice(ctx context.Context, text string) error {
 	self, err := os.Executable()
