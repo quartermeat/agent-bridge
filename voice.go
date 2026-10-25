@@ -43,6 +43,10 @@ func (e voiceFailure) Error() string {
 	return e.code
 }
 func voiceProcessFailure(code string, err error) error {
+	var failure voiceFailure
+	if errors.As(err, &failure) {
+		return failure
+	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		return voiceFailure{code, "exit " + strconv.Itoa(exit.ExitCode())}
@@ -278,6 +282,11 @@ func voiceDiagnostic(err error) string {
 	}
 	return "operation failed"
 }
+func voiceLog(d voiceDeps, format string, args ...any) {
+	if d.logf != nil {
+		d.logf(format, args...)
+	}
+}
 func voiceFailureFeedback(ctx context.Context, d voiceDeps, last *time.Time, message string) {
 	if d.speak == nil || (!last.IsZero() && time.Since(*last) < time.Minute) {
 		return
@@ -290,7 +299,7 @@ func voiceFailureFeedback(ctx context.Context, d voiceDeps, last *time.Time, mes
 func handleVoicePCM(ctx context.Context, cfg voiceConfig, d voiceDeps, pcm []byte) error {
 	dir, err := os.MkdirTemp("", "agent-bridge-voice-")
 	if err != nil {
-		return errors.New("private audio directory failed")
+		return voiceFailure{code: "private audio directory failed"}
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "utterance.wav")
@@ -300,17 +309,25 @@ func handleVoicePCM(ctx context.Context, cfg voiceConfig, d voiceDeps, pcm []byt
 	transcript, err := d.transcribe(ctx, path)
 	_ = os.Remove(path)
 	if err != nil {
+		var failure voiceFailure
+		if errors.As(err, &failure) && failure.code == "empty transcription" {
+			voiceLog(d, "voice transcription empty; ignored")
+			return nil
+		}
 		return voiceProcessFailure("transcription failed", err)
 	}
 	return handleVoiceText(ctx, cfg, d, transcript)
 }
 func writeVoiceWAV(path string, pcm []byte) error {
 	if len(pcm) > voiceRate*2*int(voiceMaxDuration/time.Second) {
-		return errors.New("audio too long")
+		return voiceFailure{code: "audio too long"}
+	}
+	if len(pcm) == 0 || len(pcm)%2 != 0 {
+		return voiceFailure{code: "invalid audio"}
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		return errors.New("private audio file failed")
+		return voiceFailure{code: "private audio file failed"}
 	}
 	defer f.Close()
 	header := make([]byte, 44)
@@ -327,10 +344,10 @@ func writeVoiceWAV(path string, pcm []byte) error {
 	copy(header[36:], "data")
 	binary.LittleEndian.PutUint32(header[40:], uint32(len(pcm)))
 	if _, err = f.Write(header); err != nil {
-		return errors.New("write audio failed")
+		return voiceFailure{code: "write audio failed"}
 	}
 	if _, err = f.Write(pcm); err != nil {
-		return errors.New("write audio failed")
+		return voiceFailure{code: "write audio failed"}
 	}
 	return nil
 }
@@ -343,39 +360,58 @@ func runVoiceFile(ctx context.Context, cfg voiceConfig, d voiceDeps) error {
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() || st.Size() < 44 || st.Size() > int64(voiceRate*2*int(voiceMaxDuration/time.Second)+4096) {
-		return errors.New("invalid or oversized WAV file")
+		return voiceFailure{code: "invalid or oversized WAV file"}
 	}
 	header := make([]byte, 12)
 	if _, err = io.ReadFull(f, header); err != nil || string(header[:4]) != "RIFF" || string(header[8:]) != "WAVE" {
-		return errors.New("invalid WAV file")
+		return voiceFailure{code: "invalid WAV file"}
 	}
 	transcript, err := d.transcribe(ctx, cfg.file)
 	if err != nil {
+		var failure voiceFailure
+		if errors.As(err, &failure) && failure.code == "empty transcription" {
+			voiceLog(d, "voice transcription empty; ignored")
+			return nil
+		}
 		return voiceProcessFailure("transcription failed", err)
 	}
 	return handleVoiceText(ctx, cfg, d, transcript)
 }
 func handleVoiceText(ctx context.Context, cfg voiceConfig, d voiceDeps, transcript string) error {
 	if len(transcript) > voiceMaxTranscript || !utf8.ValidString(transcript) {
-		return errors.New("transcript invalid or too long")
+		return voiceFailure{code: "transcript invalid or too long"}
+	}
+	if strings.TrimSpace(transcript) == "" {
+		voiceLog(d, "voice transcription empty; ignored")
+		return nil
 	}
 	prompt, ok := stripWakeWord(transcript, cfg.wakeWord)
+	voiceLog(d, "voice transcription complete wake_match=%t", ok)
 	if !ok || prompt == "" {
 		return nil
 	}
+	voiceLog(d, "voice acknowledgement playback start")
+	if err := d.speak(ctx, "I'm listening."); err != nil {
+		return voiceProcessFailure("acknowledgement playback failed", err)
+	}
+	voiceLog(d, "voice acknowledgement playback complete")
+	voiceLog(d, "voice agent turn start")
 	reply, err := d.reply(ctx, prompt)
 	if err != nil {
 		return voiceFailure{code: "agent reply failed", status: voiceDiagnostic(err)}
 	}
+	voiceLog(d, "voice agent turn complete")
 	reply = strings.TrimSpace(reply)
 	if reply == "" || !utf8.ValidString(reply) {
 		return voiceFailure{code: "agent reply invalid"}
 	}
+	voiceLog(d, "voice speech playback start")
 	for _, chunk := range voiceReplyChunks(reply) {
 		if err = d.speak(ctx, chunk); err != nil {
 			return voiceProcessFailure("speech playback failed", err)
 		}
 	}
+	voiceLog(d, "voice speech playback complete")
 	return nil
 }
 func voiceReplyChunks(reply string) []string {
@@ -450,12 +486,12 @@ func transcribeVoice(ctx context.Context, path string) (string, error) {
 		line := strings.TrimSpace(lines[i])
 		if line != "" {
 			if len(line) > voiceMaxTranscript {
-				return "", errors.New("transcript too long")
+				return "", voiceFailure{code: "transcript too long"}
 			}
 			return line, nil
 		}
 	}
-	return "", errors.New("empty transcript")
+	return "", voiceFailure{code: "empty transcription"}
 }
 func limitedCommandOutput(cmd *exec.Cmd, limit int64) ([]byte, error) {
 	pipe, err := cmd.StdoutPipe()
@@ -469,7 +505,7 @@ func limitedCommandOutput(cmd *exec.Cmd, limit int64) ([]byte, error) {
 	if int64(len(b)) > limit {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, errors.New("command output too large")
+		return nil, voiceFailure{code: "transcription output too large"}
 	}
 	if err != nil {
 		_ = cmd.Process.Kill()

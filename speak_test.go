@@ -47,7 +47,7 @@ func TestSpeakPreservesTextAndCleansPrivateFiles(t *testing.T) {
 					if tc.name == "flag" {
 						voice = "kal16"
 					}
-					wantArgs := []string{"-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "flite=textfile=speech.txt:voice=" + voice, "-f", "wav", "speech.wav"}
+					wantArgs := []string{"-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "flite=textfile=speech.txt:voice=" + voice, "-ac", "2", "-f", "wav", "speech.wav"}
 					if !reflect.DeepEqual(args, wantArgs) {
 						t.Fatalf("ffmpeg args = %q", args)
 					}

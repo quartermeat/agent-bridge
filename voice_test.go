@@ -47,7 +47,7 @@ func TestVoiceWakeGate(t *testing.T) {
 		heard = append(heard, prompt)
 		return "Hello.", nil
 	}, speak: func(_ context.Context, text string) error {
-		if text != "Hello." {
+		if text != "Hello." && text != "I'm listening." {
 			t.Fatal(text)
 		}
 		return nil
@@ -145,7 +145,7 @@ func TestVoiceOneShotAndErrors(t *testing.T) {
 		t.Fatalf("wake gate: %v %d", err, calls)
 	}
 	cfg.wakeWord = ""
-	if err := runVoiceFile(context.Background(), cfg, d); err != nil || calls != 2 {
+	if err := runVoiceFile(context.Background(), cfg, d); err != nil || calls != 3 {
 		t.Fatalf("one shot: %v %d", err, calls)
 	}
 	d.reply = func(context.Context, string) (string, error) { return "", errors.New("secret failure") }
@@ -246,5 +246,83 @@ func TestVoiceLevelTriggerAndFeedback(t *testing.T) {
 	}
 	if len(spoken) != 1 || strings.Contains(strings.Join(logs, " "), "secret") {
 		t.Fatalf("feedback=%v logs=%v", spoken, logs)
+	}
+}
+
+func TestVoiceAcknowledgementAndStageLogs(t *testing.T) {
+	var order, logs []string
+	d := voiceDeps{
+		transcribe: func(context.Context, string) (string, error) { return "Hey agent, private question", nil },
+		reply: func(_ context.Context, prompt string) (string, error) {
+			if prompt != "private question" {
+				t.Fatal(prompt)
+			}
+			order = append(order, "reply")
+			return "private answer", nil
+		},
+		speak: func(_ context.Context, s string) error {
+			order = append(order, s)
+			return nil
+		},
+		logf: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	}
+	if err := handleVoicePCM(context.Background(), voiceConfig{wakeWord: "hey agent"}, d, testVoicePCM(4000, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(order, "|"); got != "I'm listening.|reply|private answer" {
+		t.Fatal(got)
+	}
+	got := strings.Join(logs, "|")
+	for _, stage := range []string{"transcription complete wake_match=true", "acknowledgement playback start", "acknowledgement playback complete", "agent turn start", "agent turn complete", "speech playback start", "speech playback complete"} {
+		if !strings.Contains(got, stage) {
+			t.Fatalf("missing %q in %q", stage, got)
+		}
+	}
+	if strings.Contains(got, "private") {
+		t.Fatal(got)
+	}
+}
+
+func TestVoiceEmptyTranscriptionIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		transcript string
+		err        error
+	}{{"blank", "   ", nil}, {"process empty", "", voiceFailure{code: "empty transcription"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs []string
+			d := voiceDeps{
+				transcribe: func(context.Context, string) (string, error) { return tc.transcript, tc.err },
+				reply:      func(context.Context, string) (string, error) { t.Fatal("agent called"); return "", nil },
+				speak:      func(context.Context, string) error { t.Fatal("speech played"); return nil },
+				logf:       func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+			}
+			if err := handleVoicePCM(context.Background(), voiceConfig{}, d, testVoicePCM(4000, 5)); err != nil {
+				t.Fatal(err)
+			}
+			if len(logs) != 1 || logs[0] != "voice transcription empty; ignored" {
+				t.Fatal(logs)
+			}
+		})
+	}
+}
+
+func TestVoiceDiagnosticClassification(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{voiceFailure{code: "empty transcription"}, "empty transcription"},
+		{voiceFailure{code: "invalid audio"}, "invalid audio"},
+		{voiceFailure{code: "audio too long"}, "audio too long"},
+		{voiceFailure{code: "private audio file failed"}, "private audio file failed"},
+		{voiceFailure{code: "transcript invalid or too long"}, "transcript invalid or too long"},
+	} {
+		if got := voiceDiagnostic(voiceProcessFailure("transcription failed", tc.err)); got != tc.want {
+			t.Fatalf("%q != %q", got, tc.want)
+		}
+	}
+	if err := writeVoiceWAV(filepath.Join(t.TempDir(), "bad.wav"), []byte{1}); voiceDiagnostic(err) != "invalid audio" {
+		t.Fatal(err)
 	}
 }

@@ -89,7 +89,7 @@ func speakWith(args []string, input io.Reader, lookPath func(string) (string, er
 	if err := wav.Close(); err != nil {
 		return fmt.Errorf("close audio file: %w", err)
 	}
-	if err := run(ffmpeg, []string{"-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "flite=textfile=speech.txt:voice=" + *voice, "-f", "wav", "speech.wav"}, dir); err != nil {
+	if err := run(ffmpeg, []string{"-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "flite=textfile=speech.txt:voice=" + *voice, "-ac", "2", "-f", "wav", "speech.wav"}, dir); err != nil {
 		return fmt.Errorf("ffmpeg speech synthesis failed: %w", err)
 	}
 	if err := run(paplay, []string{"speech.wav"}, dir); err != nil {

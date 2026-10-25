@@ -70,9 +70,24 @@ func TestVoiceAgentThreadReuseAndResume(t *testing.T) {
 			send(response(m, map[string]any{}))
 		case "thread/start":
 			starts++
+			var params struct {
+				DeveloperInstructions string `json:"developerInstructions"`
+			}
+			_ = json.Unmarshal(m["params"], &params)
+			if params.DeveloperInstructions != voiceDeveloperInstructions {
+				t.Errorf("start instructions: %q", params.DeveloperInstructions)
+			}
 			send(response(m, map[string]any{"thread": map[string]string{"id": "thread-1"}}))
 		case "thread/resume":
 			resumes++
+			var params struct {
+				DeveloperInstructions string `json:"developerInstructions"`
+				ThreadID              string `json:"threadId"`
+			}
+			_ = json.Unmarshal(m["params"], &params)
+			if params.DeveloperInstructions != voiceDeveloperInstructions || params.ThreadID != "thread-1" {
+				t.Errorf("resume settings: %+v", params)
+			}
 			send(response(m, map[string]any{"thread": map[string]string{"id": "thread-1"}}))
 		case "turn/start":
 			turns++

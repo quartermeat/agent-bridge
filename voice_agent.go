@@ -41,6 +41,8 @@ type agentMessage struct {
 	Error  json.RawMessage `json:"error"`
 }
 
+const voiceDeveloperInstructions = "Respond for spoken playback. Keep answers concise and natural. For simple questions, answer directly without unnecessary tools."
+
 type codexPipe struct {
 	io.ReadCloser
 	writer   io.WriteCloser
@@ -273,11 +275,11 @@ func (a *voiceAgent) connect(ctx context.Context) error {
 		}
 	}
 	if a.threadID != "" {
-		_, err = a.request(ctx, "thread/resume", map[string]any{"threadId": a.threadID, "excludeTurns": true})
+		_, err = a.request(ctx, "thread/resume", map[string]any{"threadId": a.threadID, "excludeTurns": true, "developerInstructions": voiceDeveloperInstructions})
 	} else {
 		cwd, _ := os.Getwd()
 		var raw json.RawMessage
-		raw, err = a.request(ctx, "thread/start", map[string]any{"cwd": cwd, "approvalPolicy": "never", "sandbox": "read-only", "serviceName": "agent_bridge_voice"})
+		raw, err = a.request(ctx, "thread/start", map[string]any{"cwd": cwd, "approvalPolicy": "never", "sandbox": "read-only", "serviceName": "agent_bridge_voice", "developerInstructions": voiceDeveloperInstructions})
 		if err == nil {
 			var response struct {
 				Thread struct {
