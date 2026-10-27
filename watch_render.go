@@ -14,7 +14,7 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 	if s.Steinberger != nil && s.Steinberger.Health != "healthy" {
 		fmt.Fprintf(&b, "*** STEINBERGER UNHEALTHY: %s ***\n", s.Steinberger.Reason)
 	}
-	for _, line := range limitLines(s) {
+	for _, line := range watchLimitLines(s) {
 		fmt.Fprintln(&b, line)
 	}
 	for _, a := range s.Agents {
@@ -39,7 +39,12 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 	}
 	for _, a := range s.Agents {
 		prior, seen := previous[a.ID]
-		fmt.Fprintf(&b, "%-7s %-20s %-20s %s\n", a.Provider, a.ActivityState, a.Model, a.Cwd)
+		fallback := agentFallback(a, s.Jobs)
+		marker := ""
+		if fallback != nil {
+			marker = " ↺"
+		}
+		fmt.Fprintf(&b, "%-7s %-20s %-20s %s%s\n", a.Provider, a.ActivityState, a.Model, a.Cwd, marker)
 		if !a.UsageKnown {
 			fmt.Fprint(&b, "  usage pending")
 		} else {
@@ -56,6 +61,9 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 		if a.Target != nil && a.Target.Name != "" {
 			fmt.Fprintf(&b, " → %s", a.Target.Name)
 		}
+		if fallback != nil {
+			fmt.Fprintf(&b, "  %s", fallbackLabel(*fallback, s.Jobs))
+		}
 		fmt.Fprintln(&b)
 		previous[a.ID] = a.Usage
 	}
@@ -70,6 +78,9 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 		}
 		if j.Substitution != "" {
 			fmt.Fprintf(&b, "  substituted from %s", j.Substitution)
+		}
+		if j.FallbackFor != "" {
+			fmt.Fprintf(&b, "  %s", fallbackLabel(j, s.Jobs))
 		}
 		if j.Usage != nil {
 			fmt.Fprintf(&b, "  input %d output %d", j.Usage.Input, j.Usage.Output)
@@ -105,4 +116,40 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 	}
 	renderVRAM(&b, s)
 	return strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+}
+
+func watchLimitLines(s Snapshot) []string {
+	lines := limitLines(s)
+	for _, l := range s.ProviderLimits {
+		if !l.Stale {
+			continue
+		}
+		for i := range lines {
+			if strings.Contains(lines[i], l.Provider+" ") {
+				lines[i] = strings.Replace(lines[i], l.Window+" reset", fmt.Sprintf("%s reset (stale, %.0f%%)", l.Window, l.UsedPercent), 1)
+				break
+			}
+		}
+	}
+	return lines
+}
+
+func agentFallback(a AgentUsage, jobs []Job) *Job {
+	for i := range jobs {
+		j := &jobs[i]
+		if j.FallbackFor != "" && j.SessionID != "" && j.SessionID == a.SessionID && j.Status == "running" {
+			return j
+		}
+	}
+	return nil
+}
+
+func fallbackLabel(j Job, jobs []Job) string {
+	label := "fallback for " + j.FallbackFor
+	for _, original := range jobs {
+		if original.ID == j.FallbackFor && original.Name != "" {
+			return label + " (" + original.Name + ")"
+		}
+	}
+	return label
 }

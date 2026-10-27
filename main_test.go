@@ -90,6 +90,178 @@ func TestStartAndObserve(t *testing.T) {
 	}
 }
 
+func TestEPMWriteScope(t *testing.T) {
+	allowed, available := claudeTools(Job{Agent: "claude", Role: "epm", Sandbox: "workspace-write"})
+	if strings.Contains(allowed, "Bash") || strings.Contains(available, "Bash") || strings.Contains(allowed, ",Edit,") || strings.Contains(allowed, ",Write,") {
+		t.Fatalf("EPM tools are unrestricted: %q / %q", allowed, available)
+	}
+	for _, rule := range []string{"Edit(docs/**)", "Edit(**/*.md)", "Edit(README*)"} {
+		if !strings.Contains(allowed, rule) {
+			t.Errorf("missing %s in %q", rule, allowed)
+		}
+	}
+}
+
+func TestDocJobRejectsCodePaths(t *testing.T) {
+	for _, path := range []string{"main.go", "src/server.py", "../README.md"} {
+		if err := validateDocOwns("task: v1\nowns: [docs/PLAN.md, " + path + "]\n"); err == nil {
+			t.Errorf("accepted %s", path)
+		}
+	}
+	if err := validateDocOwns("owns:\n  - docs/PLAN.md\n  - README.md\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaudeCoderToolRules(t *testing.T) {
+	allowed, available := claudeTools(Job{Agent: "claude", Role: "coder", Sandbox: "workspace-write"})
+	if available != "Read,Grep,Glob,Edit,Write,Bash" || !strings.Contains(allowed, claudeCoderBash) {
+		t.Fatalf("coder allowlist changed: %q / %q", allowed, available)
+	}
+	for _, phrase := range []string{"one command per Bash call", "semicolons, &&, or pipes", "Read, Grep, or Glob instead of cat, grep, or find"} {
+		if !strings.Contains(claudeCoderToolRules, phrase) {
+			t.Errorf("missing coder tool rule %q", phrase)
+		}
+	}
+}
+
+func TestClaudeJobViolationAudit(t *testing.T) {
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.Mkdir(filepath.Join(repo, "docs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "docs", "plan.md"), []byte("plan"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	j := Job{ID: "epm-audit", Agent: "claude", Role: "epm", Cwd: repo, Status: "completed"}
+	t.Setenv("AGENT_BRIDGE_STATE_DIR", t.TempDir())
+	if err := auditClaudeJob(&j); err != nil || j.Status != "completed" {
+		t.Fatalf("document audit: %+v: %v", j, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := auditClaudeJob(&j); err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != "violation" || len(j.Violations) != 1 || j.Violations[0] != "main.go" {
+		t.Fatalf("violation audit: %+v", j)
+	}
+	encoded, err := json.Marshal(j)
+	if err != nil || !strings.Contains(string(encoded), `"violations":["main.go"]`) {
+		t.Fatalf("show JSON lacks violations: %s: %v", encoded, err)
+	}
+	decisions, err := os.ReadFile(filepath.Join(os.Getenv("AGENT_BRIDGE_STATE_DIR"), "launcher", "decisions.jsonl"))
+	if err != nil || !strings.Contains(string(decisions), `"outcome":"violation"`) {
+		t.Fatalf("missing audit decision: %s: %v", decisions, err)
+	}
+	j.Role, j.Status, j.Violations = "coder", "completed", nil
+	if err := auditClaudeJob(&j); err != nil || j.Status != "completed" {
+		t.Fatalf("coder should be exempt: %+v: %v", j, err)
+	}
+}
+
+func TestClaudeJobViolationAuditWorker(t *testing.T) {
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	state := t.TempDir()
+	t.Setenv("AGENT_BRIDGE_STATE_DIR", state)
+	fake := filepath.Join(state, "fake-claude")
+	script := "#!/bin/sh\ncat >/dev/null\nprintf 'package main\\n' > main.go\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"done\"}'\n"
+	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_BRIDGE_CLAUDE_BIN", fake)
+	id := "epm-worker-audit"
+	dir, err := jobDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	j := Job{ID: id, Agent: "claude", Role: "epm", Cwd: repo, Sandbox: "workspace-write", Status: "queued", EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt")}
+	if err := writeJob(j); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte("write docs only"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker(id); err != nil {
+		t.Fatal(err)
+	}
+	job, err := readJob(id)
+	if err != nil || job.Status != "violation" || len(job.Violations) != 1 || job.Violations[0] != "main.go" {
+		t.Fatalf("worker audit: %+v: %v", job, err)
+	}
+}
+
+func TestClaudeJobViolationAuditIgnoresPreexisting(t *testing.T) {
+	for _, tc := range []struct {
+		name, jobWrite string
+		wantViolation  bool
+	}{
+		{name: "unchanged"},
+		{name: "modified", jobWrite: "package main\n// job edit\n", wantViolation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v: %s", err, out)
+			}
+			if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main\n// preexisting\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			state := t.TempDir()
+			t.Setenv("AGENT_BRIDGE_STATE_DIR", state)
+			fake := filepath.Join(state, "fake-claude")
+			script := "#!/bin/sh\ncat >/dev/null\n"
+			if tc.jobWrite != "" {
+				script += "printf 'package main\\n// job edit\\n' > main.go\n"
+			}
+			script += "printf '%s\\n' '{\"type\":\"result\",\"result\":\"done\"}'\n"
+			if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("AGENT_BRIDGE_CLAUDE_BIN", fake)
+			id := "preexisting-audit"
+			dir, err := jobDir(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			j := Job{ID: id, Agent: "claude", Role: "epm", Cwd: repo, Sandbox: "workspace-write", Status: "queued", EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt")}
+			if err := writeJob(j); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), []byte("work"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := worker(id); err != nil {
+				t.Fatal(err)
+			}
+			got, err := readJob(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantViolation {
+				if got.Status != "violation" || len(got.Violations) != 1 || got.Violations[0] != "main.go" {
+					t.Fatalf("job = %+v", got)
+				}
+			} else if got.Status != "completed" || len(got.Violations) != 0 {
+				t.Fatalf("job = %+v", got)
+			}
+		})
+	}
+}
+
 func TestStartRole(t *testing.T) {
 	for _, tt := range []struct {
 		agent, role, want string

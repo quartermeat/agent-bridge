@@ -160,7 +160,7 @@ Gaps against the objective:
 | --- | --- | --- | --- |
 | G1 | ~~Claude can be a coder.~~ **Closed in v0.20.1**, reopened only as the usage-limit fallback in v0.21.0: a Claude coder needs `--fallback-for` (or launcher `fallback_for`) naming a usage-halted Codex coder, and Claude must have capacity. Otherwise it is closed for launcher requests, model verdicts, user approvals and direct `start --role coder`. Profiles `claude-quick` and `claude-std` still exist and are described as implementation profiles in `LAUNCHER-PROFILES.md` | `validAgentRole`; `LAUNCHER-PROFILES.md` | Q12 (retire, rename or keep for EPM children) |
 | G2 | ~~Cross-provider substitution for coding.~~ **Closed in v0.20.1**: the Codex-to-Claude entries are removed, and a coder request waits as `queued_usage_limit` while Codex is limited, with no automatic Claude substitution; only an explicit `fallback_for` request starts a Claude coder (v0.21.0). The wait has no visible retry time or expiry (G7, G9) | `substituteProfile`, `processLaunch` | M2, M3 |
-| G3 | **EPMs can edit code.** The launcher always passes `--write`, and Claude write jobs get Edit and Write; the only barrier is the prompt. This is the largest remaining hole against "EPMs never code", and the under-one-minute exception does not extend to EPMs | `dispatchLaunch`, `README.md` (`start`) | M1c (path-limited tools if the Claude CLI supports them, otherwise L2) |
+| G3 | ~~EPMs can edit code.~~ **Closed in v0.24.0**: EPM `Edit(path)` permissions (also applied to Write) are scoped to document paths, Bash is unavailable, `owns` code paths are rejected, and a post-run Git audit marks non-document changes as violations | `dispatchLaunch`, `README.md` (`start`) | M1c landed |
 | G4 | **No local EPM.** A coordinator may launch only a Claude EPM, and the local model cannot run multi-step work | `parseModelVerdict`, `checkLaunchRules` | M5 |
 | G5 | **No route concept.** Requests carry role and agent, not a route; there is no documentation-only `owns` check, no cron path and no local task queue | `launchRequest` | M4, M5 |
 | G6 | **Head-of-line blocking.** One request waiting on capacity stops the pass (`break`), so a Codex request behind a capped Claude request also waits | `launcherOnce` | M2 |
@@ -193,22 +193,19 @@ a prompt alone does not enforce anything. Layers 1 to 3 are implemented
    Codex-to-Claude entries are gone from the substitution table. When Codex is
    limited, the coder request waits as `queued_usage_limit`, never moved.
    Visible deferral reasons and retry times are still missing (M2, M3).
-4. **Claude EPM jobs get document-only write access. Not implemented (G3).**
-   Claude EPM jobs run with Edit and Write limited to the task's `owns` paths,
-   and the launcher rejects any task whose `owns` includes a code path. The
-   mechanism is path-limited tool permissions if the Claude CLI supports them;
-   if it does not, the mechanism is the L2 approval socket, and M1c ships
-   read-only EPM tools until L2 exists. This must be verified, not assumed
-   (open question Q9).
-5. **Bash for Claude jobs** stays on the existing short allowlist (build, test
-   and read-only Git commands). No shell redirection or interpreter that could
-   write code is on it.
+4. **Claude EPM jobs get document-only write access. Implemented in M1c.**
+   Claude EPM jobs run in restricted mode with `Edit(path)` rules for document
+   paths; those rules govern Write too. `owns` entries outside those paths are
+   rejected before launch. The post-run Git audit reports any non-document
+   changes as a violation.
+5. **Bash for Claude coder jobs** stays on the existing short Go, Make,
+   formatting, and Git allowlist. EPM jobs have no Bash tool.
 6. **Local model writes nothing.** Its output is a result object the bridge
    validates and stores in the job state directory. It has no file or shell tool.
-7. **After-the-fact audit.** When any Claude or local job ends, the bridge
-   compares its worktree to the base commit. Any changed path outside the
-   document allowlist marks the job `violation`, blocks integration and is
-   logged in `decisions.jsonl`. The master must not integrate a `violation` job.
+7. **After-the-fact audit.** When a Claude job ends, the bridge inspects `git status --porcelain`
+   in its worktree. An EPM with a changed path outside the document allowlist
+   ends as `violation`; the paths appear in `show` and `decisions.jsonl`.
+   Coder jobs are exempt. The master must not integrate a `violation` job.
 8. **Provenance.** Each worker branch records which job (agent, role, profile)
    produced it, so a reviewer can confirm every code commit came from a Codex
    coder job.
@@ -381,7 +378,7 @@ is given; `--agent claude --role coder` still fails; help text states the
 defaults. Covered by `TestStartRole`, `TestStartClaudeDefaultsToEPM` and
 `TestStartRejectsClaudeCoder`. Do not redo.
 
-**M1c: EPM write scope and audit (code, launcher, Claude tool args).**
+**M1c: EPM write scope and audit (landed, v0.24.0).**
 Closes G3 and layers 4, 7 and 8 above. Acceptance:
 - `go test ./... -run 'TestEPMWriteScope|TestDocJobRejectsCodePaths|TestClaudeJobViolationAudit'` passes.
 - A Claude EPM test job asked to write `main.go` is denied; writing under
@@ -513,9 +510,9 @@ Pending user clarification. None of these is assumed answered.
   the only bot I talk to"? Today it defaults to `--agent claude` with work
   access, and `--agent codex` is read-only. This draft makes no voice design
   decision.
-- Q9. Does the Claude CLI permission system support path-limited Edit and Write
-  for a headless job? If not, L2 must come before M1c. This needs a check by a
-  worker, not an assumption.
+- Q9. Resolved for M1c: the installed Claude CLI accepts path-scoped
+  `--allowed-tools` rules for Edit, which govern Write too. `Write(path)` rules
+  do not match, so M1c uses only `Edit(path)` rules.
 - Q10. Should GUP revenue work wait for any routing milestone, and if so which
   one? No gate is proposed here; this is your call.
 - Q11. Default numbers for the Codex cap, throttle windows and `token_budget`,

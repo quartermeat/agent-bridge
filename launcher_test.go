@@ -249,6 +249,15 @@ func TestForcedCoderApprovalQueuesOnCodexUsageLimit(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, "worktrees", "sample-review")); !os.IsNotExist(err) {
 		t.Fatalf("worktree created while exhausted: %v", err)
 	}
+	jobsRoot, err := os.ReadDir(filepath.Join(os.Getenv("AGENT_BRIDGE_STATE_DIR"), "jobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range jobsRoot {
+		if strings.HasPrefix(entry.Name(), "claude-") {
+			t.Fatalf("Claude job created while Codex was exhausted: %s", entry.Name())
+		}
+	}
 	if got := substituteProfile("codex-std", Snapshot{Jobs: []Job{exhausted}}); got != "" {
 		t.Fatalf("Codex substituted to %q", got)
 	}

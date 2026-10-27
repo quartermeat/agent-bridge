@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -49,6 +50,7 @@ type Job struct {
 	ResultPath     string      `json:"result_path"`
 	ContextFiles   []string    `json:"context_files,omitempty"`
 	Usage          *TokenUsage `json:"usage,omitempty"`
+	Violations     []string    `json:"violations,omitempty"`
 	Halt           *Halt       `json:"halt,omitempty"`
 	AcknowledgedAt *time.Time  `json:"acknowledged_at,omitempty"`
 }
@@ -286,6 +288,14 @@ func start(args []string) error {
 	if len(prompt) == 0 || len(prompt) > 1<<20 {
 		return errors.New("prompt must be 1 byte to 1 MiB")
 	}
+	if *agent == "claude" && *role == "epm" && *write {
+		if err := validateDocOwns(string(prompt)); err != nil {
+			return err
+		}
+	}
+	if *agent == "claude" && *role == "coder" {
+		prompt = append([]byte(claudeCoderToolRules), prompt...)
+	}
 	selected, err := selectContext(contextPaths, *contextWork)
 	if err != nil {
 		return err
@@ -417,19 +427,22 @@ func worker(id string) error {
 		return finishError(&j, err)
 	}
 	defer stderr.Close()
+	if j.Agent == "claude" && j.Role == "epm" {
+		if err := snapshotClaudeWorktree(j); err != nil {
+			return finishError(&j, err)
+		}
+	}
 	var cmd *exec.Cmd
 	if j.Agent == "claude" {
 		bin := os.Getenv("AGENT_BRIDGE_CLAUDE_BIN")
 		if bin == "" {
 			bin = "claude"
 		}
-		tools := "Read,Grep,Glob"
-		availableTools := tools
-		if j.Sandbox == "workspace-write" {
-			tools = "Read,Grep,Glob,Edit,Write,Bash(go test *),Bash(go vet *),Bash(make ci),Bash(gofmt *),Bash(git status *),Bash(git diff *),Bash(git log *),Bash(git add *)"
-			availableTools = "Read,Grep,Glob,Edit,Write,Bash"
-		}
+		tools, availableTools := claudeTools(j)
 		args := []string{"-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--tools=" + availableTools, "--allowed-tools=" + tools}
+		if j.Role == "epm" {
+			args = append(args, "--restricted")
+		}
 		if j.Model != "" {
 			args = append(args, "--model", j.Model, "--effort", j.Effort)
 		}
@@ -505,6 +518,14 @@ func worker(id string) error {
 	} else {
 		j.Status = "failed"
 	}
+	if j.Agent == "claude" {
+		if err := auditClaudeJob(&j); err != nil {
+			if j.Status != "violation" {
+				j.Status = "failed"
+			}
+			j.Error = "worktree audit: " + err.Error()
+		}
+	}
 	return writeJob(j)
 }
 
@@ -512,6 +533,214 @@ func finishError(j *Job, err error) error {
 	j.Status, j.Error = "failed", err.Error()
 	_ = writeJob(*j)
 	return err
+}
+
+const claudeCoderToolRules = `Tool rules:
+- Use one command per Bash call. Do not use semicolons, &&, or pipes.
+- Bash is limited to: go test, go vet, make ci, gofmt, git status, git diff, git log, and git add.
+- Use Read, Grep, or Glob instead of cat, grep, or find in Bash.
+
+`
+
+const claudeCoderBash = "Bash(go test *),Bash(go vet *),Bash(make ci),Bash(gofmt *),Bash(git status *),Bash(git diff *),Bash(git log *),Bash(git add *)"
+
+var documentPatterns = []string{"docs/**", "**/*.md", "*.md", "README*", "HANDOFF*", "task*.yaml", "report*.yaml", "task*.txt", "report*.txt"}
+
+func claudeTools(j Job) (allowed, available string) {
+	if j.Sandbox != "workspace-write" {
+		return "Read,Grep,Glob", "Read,Grep,Glob"
+	}
+	if j.Role == "epm" {
+		allowed := []string{"Read", "Grep", "Glob"}
+		for _, pattern := range documentPatterns {
+			allowed = append(allowed, "Edit("+pattern+")")
+		}
+		return strings.Join(allowed, ","), "Read,Grep,Glob,Edit,Write"
+	}
+	return "Read,Grep,Glob,Edit,Write," + claudeCoderBash, "Read,Grep,Glob,Edit,Write,Bash"
+}
+
+func documentPath(path string) bool {
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "." || path == ".." || strings.HasPrefix(path, "../") || filepath.IsAbs(path) {
+		return false
+	}
+	if strings.HasPrefix(path, "docs/") {
+		return true
+	}
+	base := filepath.Base(path)
+	if strings.HasSuffix(base, ".md") || strings.HasPrefix(base, "README") || strings.HasPrefix(base, "HANDOFF") {
+		return true
+	}
+	for _, prefix := range []string{"task", "report"} {
+		if strings.HasPrefix(base, prefix) && (strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".txt")) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateDocOwns(prompt string) error {
+	// Task envelopes use `owns: [path, ...]` or an indented YAML list.
+	lines := strings.Split(prompt, "\n")
+	inOwns := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "owns:") {
+			inOwns = true
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "owns:"))
+		} else if inOwns && !strings.HasPrefix(trimmed, "-") {
+			inOwns = false
+			continue
+		} else if !inOwns {
+			continue
+		}
+		trimmed = strings.Trim(trimmed, "[]")
+		for _, item := range strings.Split(trimmed, ",") {
+			path := strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(item), "-")), "'\"` ")
+			if path != "" && !documentPath(path) {
+				return fmt.Errorf("EPM owns non-document path %q", path)
+			}
+		}
+	}
+	return nil
+}
+
+type dirtyPath struct {
+	Status string `json:"status"`
+	Hash   string `json:"hash"`
+}
+
+func claudeDirtyPaths(cwd string) (map[string]dirtyPath, error) {
+	cmd := exec.Command("git", "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 128 && strings.Contains(string(exit.Stderr), "not a git repository") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	paths := make(map[string]dirtyPath)
+	fields := strings.Split(string(out), "\x00")
+	for i := 0; i < len(fields); i++ {
+		entry := fields[i]
+		if len(entry) < 4 {
+			continue
+		}
+		status := entry[:2]
+		for _, path := range []string{entry[3:]} {
+			fingerprint, err := dirtyPathFingerprint(filepath.Join(cwd, path))
+			if err != nil {
+				return nil, err
+			}
+			paths[path] = dirtyPath{Status: status, Hash: fingerprint}
+		}
+		if entry[0] == 'R' || entry[0] == 'C' || entry[1] == 'R' || entry[1] == 'C' {
+			i++
+			if i < len(fields) {
+				fingerprint, err := dirtyPathFingerprint(filepath.Join(cwd, fields[i]))
+				if err != nil {
+					return nil, err
+				}
+				paths[fields[i]] = dirtyPath{Status: status, Hash: fingerprint}
+			}
+		}
+	}
+	return paths, nil
+}
+
+func dirtyPathFingerprint(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return "deleted", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("symlink:%x", sha256.Sum256([]byte(target))), nil
+	}
+	if !info.Mode().IsRegular() {
+		return info.Mode().String(), nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func snapshotClaudeWorktree(j Job) error {
+	paths, err := claudeDirtyPaths(j.Cwd)
+	if err != nil {
+		return err
+	}
+	dir, err := jobDir(j.ID)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(paths)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "worktree-baseline.json"), b, 0600)
+}
+
+func auditClaudeJob(j *Job) error {
+	if j.Role != "epm" {
+		return nil
+	}
+	paths, err := claudeDirtyPaths(j.Cwd)
+	if err != nil {
+		return err
+	}
+	baseline := make(map[string]dirtyPath)
+	if dir, err := jobDir(j.ID); err == nil {
+		if b, err := os.ReadFile(filepath.Join(dir, "worktree-baseline.json")); err == nil {
+			if err := json.Unmarshal(b, &baseline); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	} else {
+		return err
+	}
+	for path, state := range paths {
+		if !documentPath(path) && baseline[path] != state {
+			j.Violations = append(j.Violations, path)
+		}
+	}
+	if len(j.Violations) == 0 {
+		return nil
+	}
+	sort.Strings(j.Violations)
+	j.Status = "violation"
+	return appendViolationDecision(*j)
+}
+
+func appendViolationDecision(j Job) error {
+	dir, err := launcherStateDir()
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "decisions.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return json.NewEncoder(f).Encode(map[string]any{"ts": time.Now().UTC(), "id": j.ID, "rule": "claude_epm_document_scope", "outcome": "violation", "violations": j.Violations})
 }
 
 func processStart(pid int) string {

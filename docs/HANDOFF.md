@@ -18,3 +18,16 @@ systemctl --user enable --now agent-bridge-voice.service
 ```
 
 If the source is not capturing speech, inspect `pactl list sources` and set `--source` in the installed user unit, then `systemctl --user daemon-reload` and restart the service. The selected Pulse source is `alsa_input.pci-0000_28_00.4.analog-stereo`, as confirmed by the user. The Brio source produced near-zero levels in the earlier test.
+
+Troubleshooting 2026-10-25: silent replies with "speech playback complete" in the journal meant PipeWire stream-restore had saved `paplay` at 0%; set to 100% while a phrase plays (`pactl set-sink-input-volume <id> 100%`). Whisper "Thanks for watching!" transcripts meant clipping: Starship capture was 100% (+30 dB) plus +20 dB mic boost; now 61% (+12 dB), ambient RMS ~0.002.
+
+Launcher 2026-10-26 (v0.19.0): spool launcher, Claude jobs, roles, profiles and local agents landed (design: docs/LAUNCHER.md, docs/LAUNCHER-PROFILES.md). Verified live: a claude-quick job, and a coordinator→EPM request that the local qwen3-coder dispatcher approved, which created a worktree and ran a Claude EPM job. Not yet done: installing the new binary and enabling `packaging/agent-bridge-launcher.service`; L2 tool-approval socket; local token grains in token-sand; watch scrollback fix (alt screen + scrolling).
+
+2026-10-26 late (Claude EPM, Codex at its 5-hour limit): v0.21.0 Claude coder fallback (`--fallback-for` a usage-halted Codex coder; rule in ~/AGENTS.md), v0.22.0 local-model queue (LOCAL-FEEDBACK milestone A), v0.23.0 proactive backpressure (Codex `provider_limits` in snapshot/watch; coder launches deferred at ≥90% until reset). Verified: full suite twice, -race on the queue, live `provider_limits` 98% → resets 00:46 EDT. Claude coders need single-command Bash (AB-016). Still open: Codex worktrees epm-default, epm-docs, claude-default-code, codex-only, routing (left for Codex to prune); docs/QUEUE-2026-10-27.md items 2–3 (GUP paused, ChatGPT theme needs approval).
+
+## v0.24.0 (2026-10-27, Claude EPM; Codex coders m1c, m1c-baseline, watchfb)
+- M1c/G3: Claude EPM write jobs get `Edit(<doc pattern>)` permissions only, `--restricted`, and no Bash. `owns` must be document paths. After the job, a git audit (with a pre-job baseline) marks any non-document change as `violation`.
+- AB-016: the bridge prepends Tool rules to Claude coder prompts.
+- Watch shows `fallback for <id> (<name>)`, a `↺` marker, and stale provider limits.
+- The repo has no Makefile; the gate is `gofmt -l . && go vet ./... && go test ./...`.
+- Next: docs/AUTOMATION.md (scripts/timers replacing manual rituals; Q1 auto-prune and Q2 hooks approved).

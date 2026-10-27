@@ -82,3 +82,28 @@ func TestPlainFrameNoEscapes(t *testing.T) {
 		t.Fatalf("plain frame: %q", frame)
 	}
 }
+
+func TestWatchFallbackAndStaleLimits(t *testing.T) {
+	s := Snapshot{
+		SampledAt:      time.Now(),
+		ProviderLimits: []ProviderLimit{{Provider: "codex", Window: "5h", Stale: true}},
+		Jobs: []Job{
+			{ID: "halted", Name: "backpressure", Status: "halted"},
+			{ID: "fallback", Name: "continue work", Status: "running", FallbackFor: "halted", SessionID: "session"},
+		},
+		Agents: []AgentUsage{{ID: "worker", Provider: "claude", ActivityState: "active", SessionID: "session"}},
+	}
+	lines := renderWatchFrame(s, "direct", map[string]TokenUsage{})
+	frame := strings.Join(lines, "\n")
+	if strings.Count(frame, "fallback for halted (backpressure)") != 2 || !strings.Contains(frame, "5h reset (stale, 0%)") {
+		t.Fatalf("frame: %s", frame)
+	}
+	compact := strings.Join(selectWatchLines(lines, filterAll, true), "\n")
+	if !strings.Contains(compact, "↺") {
+		t.Fatalf("compact: %s", compact)
+	}
+	s.Jobs = s.Jobs[1:]
+	if got := fallbackLabel(s.Jobs[0], s.Jobs); got != "fallback for halted" {
+		t.Fatalf("missing original: %q", got)
+	}
+}
