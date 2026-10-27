@@ -7,7 +7,9 @@ Launch observable Codex CLI jobs from Claude Code or any shell. Jobs run in sepa
 ```bash
 agent-bridge snapshot                 # one machine-readable JSON sample
 agent-bridge latest                   # most recent daemon sample; fails if stale
-agent-bridge watch --interval 2s      # live terminal view; Ctrl-C to exit
+agent-bridge watch --interval 2s      # full-screen viewer; q or Ctrl-C to exit
+agent-bridge watch --plain            # append plain frames (also automatic when piped)
+agent-bridge watch --once             # print one plain frame
 agent-bridge speak --text 'Agent bridge is ready.'
 ```
 
@@ -22,7 +24,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now agent-bridge-monitor.service
 ```
 
-The daemon starts under the user systemd manager and refreshes `~/.local/state/agent-bridge/latest.json` every two seconds. It writes the file atomically with user-only permissions. Other monitors can read that file or call `agent-bridge latest`; `latest` exits nonzero if the sample is older than ten seconds. `snapshot` always collects a fresh sample. `watch` uses the daemon's sample when available and falls back to direct sampling otherwise. Closing the viewer window does not stop the daemon.
+The daemon starts under the user systemd manager and refreshes `~/.local/state/agent-bridge/latest.json` every two seconds. It writes the file atomically with user-only permissions. Other monitors can read that file or call `agent-bridge latest`; `latest` exits nonzero if the sample is older than ten seconds. `snapshot` always collects a fresh sample. `watch` uses the daemon's sample when available and falls back to direct sampling otherwise. Closing the viewer window does not stop the daemon. In a terminal, `watch` uses the alternate screen and restores the prior display on exit, so redraws do not fill scrollback. `j`/`k` and arrow keys scroll one line; `PgUp`/`PgDn` and space scroll one page; `g`/`G` jump to top/bottom. `c` toggles compact active agents/jobs; `f` cycles all, active, jobs, and local filters; `q` or Ctrl-C quits. The last row shows time, daemon/direct origin, visible line range, filter, and key hints. Resize redraws the viewport. `--interval` defaults to 2 s and must be at least 500 ms. `--plain` appends frames without escape codes, and `--once` prints one plain frame; non-terminal output automatically uses plain mode.
 
 `speak` provides local one-way audio output. It reads text from `--text` or stdin,
 uses FFmpeg's Flite filter, and plays through `paplay` on the current default

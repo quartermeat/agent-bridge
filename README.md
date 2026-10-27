@@ -38,7 +38,7 @@ agent-bridge ask --provider ollama --list-models
 agent-bridge request --file launch.yaml | request-status REQUEST_ID
 agent-bridge launcher [--once] | approvals | approve [--profile NAME] REQUEST_ID | deny REQUEST_ID
 agent-bridge list | show JOB_ID | wait JOB_ID... | stop JOB_ID | ack JOB_ID
-agent-bridge snapshot | latest | watch
+agent-bridge snapshot | latest | watch [--interval 2s] [--plain] [--once]
 agent-bridge speak --text 'Agent bridge is ready.'
 agent-bridge voice --agent claude [--access read|work] --source PULSE_SOURCE --wake-word 'hey agent' [--max-utterance 30s] [--follow-up 20s]
 agent-bridge voice-log [--follow] [--lines 50] [--json]
@@ -78,7 +78,7 @@ The `agent-bridge-monitor` user service samples every two seconds to `~/.local/s
 - GPU VRAM, top VRAM processes, and loaded Ollama models.
 - Steinberger timer health and recent commits from repo-attention's small feed.
 
-`watch` shows the same view live and turns red at 90% VRAM. The token feed is at `~/.local/state/agent-bridge/token-feed.tsv`.
+`watch` opens a full-screen viewer in a terminal and restores the previous screen when it exits, leaving scrollback clean. Use `j`/`k` or arrow keys to scroll by line, `PgUp`/`PgDn` or space to move by page, `g`/`G` for top/bottom, `c` for a compact view of active agents and jobs, `f` to cycle all/active/jobs/local filters, and `q` or Ctrl-C to quit. The bottom bar shows sample origin, visible line range, filter, and key hints. `--interval DURATION` sets refresh time (minimum 500 ms; default 2 s). `--plain` appends frames without terminal controls; `--once` prints one plain frame and exits. Piped output automatically uses plain mode. The viewer turns red at 90% VRAM. The token feed is at `~/.local/state/agent-bridge/token-feed.tsv`.
 
 ## Build and check
 
