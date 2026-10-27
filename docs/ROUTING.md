@@ -1,25 +1,45 @@
 # Task routing: requirements and design draft
 
-Status: draft for review (2026-10-26). Nothing in this document is implemented
-unless the "Existing behavior" section says so. Companion to `LAUNCHER.md` (L1
-launcher and EPM design) and `LAUNCHER-PROFILES.md` (job profiles).
+Status: draft for review (2026-10-26, revised after the user's role correction
+the same day, and again for the user's local-model instruction). Nothing in this
+document is implemented unless the "Existing behavior" section says so.
+Companion to `LAUNCHER.md` (L1 launcher and EPM design), `LAUNCHER-PROFILES.md`
+(job profiles) and `LOCAL-FEEDBACK.md` (measured local-model trial).
 
 ## Objective
 
-The user's request of 2026-10-26, restated as requirements:
+The user's requests of 2026-10-26, restated as requirements:
 
 1. Codex is the only agent the user talks to.
-2. Codex creates an EPM (engineering project manager) in Claude or in a local
-   model, according to task complexity.
-3. EPMs use only freshly spawned Codex instances for runnable code work, under
-   the organizational rules in `~/AGENTS.md`.
-4. Documents, requirements and schedules go to Claude.
-5. Simple tasks become a cron job. What counts as simple, and what counts as
+2. Every Claude instance is an EPM (engineering project manager) from its first
+   turn. There is no Claude coder role.
+3. The Codex master may write code itself **only when the task takes under one
+   minute**. Anything longer is delegated. The user's words: "I want my
+   instances of claude to be an epm right off the bat, I want you to be a coder
+   first, only if it takes under a minute to perform. Anything other than that,
+   I need you to delegate."
+4. Codex creates an EPM in Claude or in a local model, according to task
+   complexity.
+5. EPMs never code. Their runnable code work goes only to freshly spawned Codex
+   coders, under the organizational rules in `~/AGENTS.md`.
+6. Documents, requirements and schedules go to Claude, as EPM work.
+7. Simple tasks become a cron job. What counts as simple, and what counts as
    recurring, is **pending user clarification**.
-6. Tasks whose decision tree is larger than cron go to the local model, which
+8. Tasks whose decision tree is larger than cron go to the local model, which
    needs a queue.
-7. Spawned Claude and Codex jobs run within their token or usage limits.
-8. This routing system precedes any new GUP revenue work.
+9. Spawned Claude and Codex jobs run within their token or usage limits.
+10. The user said this routing system should precede new GUP revenue work. When
+    GUP work starts, and which routing milestone counts as "done enough", is the
+    user's decision (Q10). This document sets no gate of its own.
+
+11. Latest instruction, on the local model: "I need you frontier models to give
+    more love to the local, monitor performance, so you have a feedback loop of
+    what kind of tasks it can handle in an amount of time." This makes a
+    **measured local trial** a priority: frontier Codex and Claude EPMs send the
+    local model bounded work, record how it performs against a time budget, and
+    use that record to decide which task classes it keeps. The design is in
+    `LOCAL-FEEDBACK.md`. It does not change items 1 to 10, and it does not answer
+    the open cron and GUP questions (Q1 to Q3, Q10).
 
 Non-goals: autonomous publishing, financial transactions, GUP deployment, and
 any change to GUP. This document does not touch GUP.
@@ -29,18 +49,29 @@ any change to GUP. This document does not touch GUP.
 | Actor | Does | Must not |
 | --- | --- | --- |
 | User | Talks to the Codex master; resolves escalations; grants explicit approval for sensitive actions | n/a |
-| Codex master (coordinator) | Classifies the task, writes the task spec, requests an EPM or a document job, reviews, integrates, commits and tags | Edit code, tests, data, build files, configuration, assets or version files itself |
-| Claude EPM | Plans and splits work, writes documents and task prompts, requests fresh Codex coders, reviews reports and diffs | Write or edit code; run project code; integrate to `main` |
-| Claude document job | Writes requirements, designs, schedules and other documents inside owned documentation paths | Touch any non-document path |
+| Codex master (coordinator) | Classifies the task, writes the task spec, requests an EPM, reviews, integrates, commits and tags. May edit code itself **only** for a task that takes under one minute (route R-direct) | Edit code for anything that takes a minute or longer; code because a provider is limited; touch GUP |
+| Claude EPM | The only role a Claude instance has, from its first turn. Plans and splits work, writes documents, requirements, schedules and task prompts, requests fresh Codex coders, reviews reports and diffs | Write or edit code; run project code; integrate to `main`; act as a coder for any duration |
 | Local model | Runs queued decision-tree tasks and launch verdicts; may act as a local EPM once L3 exists | Write files or run commands on its own; write code; pick Claude or Codex coders outside the rules |
 | Codex coder | Fresh job per task, own worktree and branch, owned paths, exact checks | Spawn jobs; resume an earlier session; widen its owned paths |
 | Launcher (`agent-bridge launcher`) | Applies deterministic rules, asks the local model for verdicts, creates worktrees, starts jobs | Be overridden by any model verdict |
 | Monitor | Publishes snapshots of agents, jobs, halts, GPU and tokens | Make routing decisions |
 
-Role boundary reminders from `~/AGENTS.md`: the master never codes; limits do not
-move coding authority to the master; integration (commit, tag, merge) stays with
-the master after reviewing the report, diff and checks; no push, publish or
-deploy without explicit user intent.
+A documentation-only job is an EPM job whose `owns` list contains only document
+paths. It is not a separate role.
+
+Role boundary reminders from `~/AGENTS.md`, as amended by the user's correction
+of 2026-10-26: the master delegates every non-document change except a task that
+takes under one minute (the guide now says so: G11 is closed); limits do not
+move coding authority to the master, so the exception never applies because a
+provider is limited; integration (commit, tag, merge) stays with the master
+after reviewing the report, diff and checks, including for work the master did
+itself; no push, publish or deploy without explicit user intent.
+
+The under-one-minute exception is an honor-system rule for the Codex master. The
+bridge cannot see the master's own edits, so it cannot enforce the limit.
+Proposed evidence: the master states the estimate and the elapsed time in its
+status line. What the minute includes (checks, version bump, commit) is
+Q15.
 
 "Fresh" Codex means a new bridge job per task: new job ID, new worktree and
 branch, no reused or resumed session, and no context beyond the task spec and
@@ -49,21 +80,30 @@ the files passed with `--context`.
 "Code" means every path that is not a document. For enforcement, a document is a
 file under `docs/` or a Markdown file or a task prompt. Everything else is code,
 including tests, data, build files, configuration, assets and version files,
-matching the master role boundary in `~/AGENTS.md`.
+matching the master role boundary in `~/AGENTS.md`. A sub-minute change by the
+Codex master to any of these paths is the only code written outside a coder job.
 
 ## Route table
 
 The Codex master picks a route and states it in the request. The launcher
 validates the route against hard rules; the local model may only pick a cheaper
-option inside the route, never a different route class.
+option inside the route, never a different route class. A request cannot name a
+Claude coder: the launcher rejects it (see "Strict Codex-only coding
+enforcement").
 
 | Route | Trigger (proposed rubric; pending confirmation) | Executor | Writes | Output |
 | --- | --- | --- | --- | --- |
-| R-cron: one-off or simple recurring | Single deterministic command or script, no branching on its output, no judgment. "Simple" and "recurring" thresholds are pending user clarification | A scheduled job spec that runs without any model. The script itself is code, so a fresh Codex coder writes it | Script and schedule entry, both code or configuration | Exit status and log |
-| R-doc: documents, requirements, schedules | The deliverable is prose or a plan, no runnable code | Claude document job (or a Claude EPM that owns only documentation paths) | Documentation paths only | Document plus report v2 |
-| R-local: decision tree larger than cron | Bounded steps with branches decided by classification, triage or checks; no code authoring | Local model through the local queue | Result files in the job state directory only | Structured result (JSON or YAML) plus log |
-| R-code: coding | Any change to a non-document path | Claude EPM or local EPM plans and splits; each unit of work runs in a fresh Codex coder | Owned paths in the worker's own worktree | Branch, report v2, check output |
+| R-direct: sub-minute change | A non-document change the master expects to take under one minute. Threshold and what it includes are pending Q15 | The Codex master itself, the only exception to delegation | The files the change needs, on a branch or worktree as for any other change | Diff, checks, and the usual reviewed commit |
+| R-cron: one-off or simple recurring | Single deterministic command or script, no branching on its output, no judgment. "Simple" and "recurring" thresholds are pending user clarification | A scheduled job spec that runs without any model. The script itself is code, so a fresh Codex coder writes it (or R-direct if it is a sub-minute change) | Script and schedule entry, both code or configuration | Exit status and log |
+| R-doc: documents, requirements, schedules | The deliverable is prose or a plan, no runnable code | Claude EPM that owns only documentation paths | Documentation paths only | Document plus report v2 |
+| R-local: decision tree larger than cron | Bounded steps with branches decided by classification, triage or checks; no code authoring. A task class qualifies by the rule in `LOCAL-FEEDBACK.md`: it is on the allowed list, has a declared time budget, and is not on a frontier-only list. Until a class has measured evidence it runs as a trial (exploration or baseline pair), not as a trusted route | Local model through the local queue; a frontier agent reviews and keeps the safe fallback | Result files in the job state directory only | Structured result (JSON or YAML), log, and a telemetry record |
+| R-code: coding | A non-document change that takes a minute or longer | Claude EPM or local EPM plans and splits; each unit of work runs in a fresh Codex coder | Owned paths in the worker's own worktree | Branch, report v2, check output |
 | R-review: review and integration | A finished worker branch | Fresh read-only Codex job for review when checks must run; the EPM reviews reports and diffs; the Codex master integrates | Integration commit and tag by the master only | Reviewed diff, evidence, commit |
+
+A Claude instance started without an explicit role is an EPM. `agent-bridge
+start --agent claude` selects role `epm` and profile `claude-epm` by default
+(landed in v0.20.2, gap G12 closed). An explicit `--agent claude --role coder`
+still fails with "Claude cannot run the coder role".
 
 Choosing the EPM host for R-code ("Claude or a local model according to task
 complexity") needs a rubric. Proposed, not confirmed: use the local EPM when the
@@ -78,22 +118,37 @@ user approval.
 
 ## Existing behavior and gaps
 
-Implemented as of v0.20.0 (L1, checked against `launcher.go`, `profiles.go`,
-`main.go`, `localmodel.go` and the packaged units):
+Implemented as of v0.20.2 (L1, the Codex-only coder restriction from v0.20.1,
+and the Claude-defaults-to-EPM `start` default from v0.20.2, checked against
+`launcher.go`, `profiles.go`, `main.go`, `localmodel.go` and the packaged
+units). Locations are function names, because line numbers drift.
 
 | Area | Behavior | Where |
 | --- | --- | --- |
-| Roles and depth | `coder` and `epm`; Codex cannot be `epm`; depth cap 3 | `launcher.go:126`, `launcher.go:540` |
-| Requester rules | Coordinator may request only an `epm`; only a running Claude EPM job may request from a job; Codex and coder jobs cannot | `launcher.go:490`, `launcher.go:534` |
-| Spool and CLI | `request`, `request-status`, `launcher`, `approvals`, `approve`, `deny`; private spool, FIFO by mtime | `launcher.go:340`, `launcher.go:866` |
-| Local verdict | Ollama model returns approve, escalate or reject as validated JSON; timeouts and errors escalate | `launcher.go:583`, `launcher.go:646` |
-| Dispatch | Worktree at `~/worktrees/<repo>-<task>` on `worker/<task>`, then `start --write` with parent job and spawner | `launcher.go:695` |
+| Roles and depth | `coder` and `epm`; Codex cannot be `epm`; **Claude cannot be `coder`** (v0.20.1); depth cap 3 | `validAgentRole`, `checkLaunchRules` |
+| Codex-only coder, request | `launch/v1` with `role: coder, agent: claude` is rejected at parse time and again in the hard rules; a profile whose agent cannot hold the role is rejected | `parseLaunchYAML`, `checkLaunchRules` |
+| Codex-only coder, verdict | A model verdict may not change the requested agent or role; a Claude coder verdict is rejected; the model prompt says `agent: auto` for a coder means Codex | `parseModelVerdict`, `modelLaunchVerdict` |
+| Codex-only coder, substitution | The Codex-to-Claude profile entries are gone; only Claude-to-Codex remains. When Codex is exhausted, a coder request is written as `queued_usage_limit` and retried, never moved to Claude | `substituteProfile`, `processLaunch` |
+| Codex-only coder, user approval | A forced (user-approved) `agent: auto` coder resolves to Codex; `approve --profile` re-validates agent and role | `processLaunch`, `resolveApprovalCommand` |
+| Codex-only coder, direct start | `agent-bridge start --agent claude --role coder` fails with "Claude cannot run the coder role" (`TestStartRejectsClaudeCoder`) | `start`, `validAgentRole` |
+| Start defaults (v0.20.2) | `--agent claude` with no `--role` selects `epm` and profile `claude-epm`; Codex defaults to `coder` and `codex-std` (`TestStartClaudeDefaultsToEPM`) | `startRole`, `defaultProfile`, `start` |
+| Requester rules | Coordinator may request only an `epm`; only a running Claude EPM job may request from a job; Codex and coder jobs cannot | `requesterDepth`, `checkLaunchRules` |
+| Spool and CLI | `request`, `request-status`, `launcher`, `approvals`, `approve`, `deny`; private spool, FIFO by mtime | `requestCommand`, `launcherOnce` |
+| Local verdict | Ollama model returns approve, escalate or reject as validated JSON; timeouts and errors escalate | `parseModelVerdict`, `modelLaunchVerdict` |
+| Dispatch | Worktree at `~/worktrees/<repo>-<task>` on `worker/<task>`, then `start --write` with parent job and spawner | `dispatchLaunch` |
 | Profiles | Seven named profiles, cost order, wall-clock limit enforced by the bridge | `profiles.go`, `packaging/profiles.yaml` |
-| Concurrency | At most 4 live launcher jobs (`AGENT_BRIDGE_LAUNCHER_MAX_JOBS`), 2 Claude, 1 `claude-deep`; over-cap requests wait | `launcher.go:70` |
-| Usage backpressure | Reactive: a provider is exhausted if an agent is `halted_usage` or a job halted with `usage_limit` in the last hour; launcher substitutes a profile or escalates | `launcher.go:99`, `launcher.go:111`, `launcher.go:801` |
-| Escalation | Pending files, desktop notification, timeout deny | `launcher.go:690`, `launcher.go:837` |
-| Observability | `decisions.jsonl`, job fields `agent`, `role`, `depth`, `profile`, `substitution`; snapshot and `watch` | `launcher.go:469` |
+| Concurrency | At most 4 live launcher jobs (`AGENT_BRIDGE_LAUNCHER_MAX_JOBS`), 2 Claude, 1 `claude-deep`; over-cap requests wait | `launcherSlotAvailable` |
+| Usage backpressure | Reactive: a provider is exhausted if an agent is `halted_usage` or a job halted with `usage_limit` in the last hour; a coder waits, an EPM request escalates | `providerExhausted`, `processLaunch` |
+| Escalation | Pending files, desktop notification, timeout deny | `notifyPending`, `expirePending` |
+| Observability | `decisions.jsonl`, job fields `agent`, `role`, `depth`, `profile`, `substitution`; snapshot and `watch` | `appendDecision` |
 | Local model | Pinned model service, lease and yield around GPU renders, completions via `ollamaCompletion` | `localmodel.go` |
+
+Not yet true, although the master's instruction implies it: `claude-quick` and
+`claude-std` remain as profiles that no role can use, and Claude write jobs,
+EPM jobs included, still carry Edit and Write with no path restriction. The
+launcher passes `--write` to every job it starts, so an EPM's inability to code
+rests on its prompt alone. No tool in the bridge limits an EPM to documentation
+paths today.
 
 Planned, not implemented: **L2** (launcher approval socket for tool calls inside
 Claude jobs) and **L3** (the local model executes small tasks itself). Neither
@@ -103,40 +158,48 @@ Gaps against the objective:
 
 | # | Gap | Evidence | Needed by |
 | --- | --- | --- | --- |
-| G1 | Claude can be a **coder**. The hard rules accept `agent: claude, role: coder`, the verdict parser accepts it, and profiles `claude-quick` and `claude-std` are described as implementation profiles | `launcher.go:610`, `LAUNCHER-PROFILES.md` | M1 |
-| G2 | **Cross-provider substitution for coding.** When Codex is exhausted, `codex-std` becomes `claude-quick` and `codex-deep` becomes `claude-std`, so a coding task moves to Claude | `launcher.go:99` | M1 |
-| G3 | **EPMs can edit code.** The launcher always passes `--write`, and Claude write jobs get Edit and Write; the only barrier is the prompt | `launcher.go:710`, `README.md` (`start`) | M1 (path-limited tools if the Claude CLI supports them, otherwise L2) |
-| G4 | **No local EPM.** A coordinator may launch only a Claude EPM, and the local model cannot run multi-step work | `launcher.go:534`, `launcher.go:610` | M5 |
-| G5 | **No route concept.** Requests carry role and agent, not a route; there is no document-only role, no cron path and no local task queue | `launchRequest` | M4, M5 |
-| G6 | **Head-of-line blocking.** One request waiting on capacity stops the pass (`break`), so a Codex request behind a capped Claude request also waits | `launcher.go:900` | M2 |
+| G1 | ~~Claude can be a coder.~~ **Closed in v0.20.1** for launcher requests, model verdicts, user approvals and direct `start --role coder`. Profiles `claude-quick` and `claude-std` still exist and are described as implementation profiles in `LAUNCHER-PROFILES.md` | `validAgentRole`; `LAUNCHER-PROFILES.md` | Q12 (retire, rename or keep for EPM children) |
+| G2 | ~~Cross-provider substitution for coding.~~ **Closed in v0.20.1**: the Codex-to-Claude entries are removed, and a coder request waits as `queued_usage_limit` while Codex is limited. The wait has no visible retry time or expiry (G7, G9) | `substituteProfile`, `processLaunch` | M2, M3 |
+| G3 | **EPMs can edit code.** The launcher always passes `--write`, and Claude write jobs get Edit and Write; the only barrier is the prompt. This is the largest remaining hole against "EPMs never code", and the under-one-minute exception does not extend to EPMs | `dispatchLaunch`, `README.md` (`start`) | M1c (path-limited tools if the Claude CLI supports them, otherwise L2) |
+| G4 | **No local EPM.** A coordinator may launch only a Claude EPM, and the local model cannot run multi-step work | `parseModelVerdict`, `checkLaunchRules` | M5 |
+| G5 | **No route concept.** Requests carry role and agent, not a route; there is no documentation-only `owns` check, no cron path and no local task queue | `launchRequest` | M4, M5 |
+| G6 | **Head-of-line blocking.** One request waiting on capacity stops the pass (`break`), so a Codex request behind a capped Claude request also waits | `launcherOnce` | M2 |
 | G7 | **Queue is invisible.** Spool and capacity waits are not in the snapshot, `list` or `watch`; there is no queue depth, age or deferral reason | `monitor.go`, `watch_render.go` have no spool reference | M2 |
-| G8 | **No cancel, priority or expiry** for queued launch requests (pending approvals do expire) | `launcher.go:837` | M2 |
-| G9 | **Backpressure is reactive and coarse.** No Codex cap, no deferral time, no per-job token budget; an exhausted provider is detected only after a job halts | `launcher.go:70` | M3 |
+| G8 | **No cancel, priority or expiry** for queued launch requests (pending approvals do expire) | `expirePending`, `launcherOnce` | M2 |
+| G9 | **Backpressure is reactive and coarse.** No Codex cap, no deferral time, no per-job token budget; an exhausted provider is detected only after a job halts | `launcherSlotAvailable`, `providerExhausted` | M3 |
 | G10 | **User still talks to more than Codex.** Escalations go to `approvals` and desktop notifications, and the voice daemon defaults to `--agent claude` with work access | `README.md` voice section | open question Q7, Q8 |
-| G11 | `~/AGENTS.md` says the master may choose Codex or Claude for each job. The user's instruction narrows this for coding; the guide has not been updated | `~/AGENTS.md` | M0 (user-approved edit) |
+| G11 | ~~`~/AGENTS.md` still says the master never edits code and may choose Codex or Claude for each job.~~ **Closed**: the global guide's master and coding worker roles now say the Codex master may edit code only for a task under one minute, every Claude instance starts as an EPM, and coding workers are Codex only. Cron, voice, GUP timing and trial defaults are not part of this edit and stay open | `~/AGENTS.md` (master and coding worker roles) | Q1 to Q3, Q8, Q10 |
+| G12 | ~~Claude does not start as an EPM by default.~~ **Closed in v0.20.2**: `start --agent claude` selects `epm` and `claude-epm`, and the help text states the defaults. Voice and interactive Claude sessions are not covered (Q16) | `startRole`, `start` | Q16 |
+| G13 | **The sub-minute exception has no enforcement or evidence trail.** The bridge cannot see the master's own edits, so nothing checks the time estimate or that a Claude instance did not take the exception | n/a | Q15 |
+| G14 | **Legacy job records.** `readJob` defaults an empty role to `coder` for any agent, so an old Claude job without a role displays as a Claude coder | `readJob` | Low priority; decide whether to default by agent |
+| G15 | **No measured local use.** The local model only issues launch verdicts. Nothing sends it bounded work, records its wall time, tokens or result validity, or lets a frontier agent grade the output, so no one knows which tasks it can handle in what time. This is the gap the user's latest instruction targets | `launcher.go`, `localmodel.go`, `ollama.go` (completions are serialized in process but not queued or recorded as task outcomes) | M5a to M5c; design in `LOCAL-FEEDBACK.md` |
 
 ## Strict Codex-only coding enforcement
 
-Requirement: no code reaches a worktree except through a fresh Codex coder job.
-Enforce in layers, because a prompt alone does not enforce anything.
+Requirement: no code reaches a worktree except through a fresh Codex coder job,
+or a sub-minute edit by the Codex master (R-direct). Enforce in layers, because
+a prompt alone does not enforce anything. Layers 1 to 3 are implemented
+(v0.20.1); layers 4 to 8 are not.
 
-1. **Request rule (deterministic).** `role: coder` requires `agent: codex`.
-   `agent: auto` for a coder resolves to Codex. A violating request is rejected
-   with a stable rule string, for example `coding requires Codex`, visible in
-   `request-status`.
-2. **Verdict rule.** The verdict parser rejects any model verdict that sets a
-   coder to Claude, whatever the model returns.
-3. **No substitution across providers for coding.** Remove the Codex-to-Claude
-   entries from the substitution table. When Codex is limited, the coder request
-   is deferred (see backpressure), never moved. Codex-to-Codex profile
-   downgrades inside one provider remain allowed.
-4. **Claude jobs get document-only write access.** Claude EPM and document jobs
-   run with Edit and Write limited to the task's `owns` paths, and the launcher
-   rejects any task whose `owns` includes a code path. The mechanism is
-   path-limited tool permissions if the Claude CLI supports them; if it does
-   not, the mechanism is the L2 approval socket, and M1 ships read-only EPM
-   tools plus a document-job path until L2 exists. This must be verified, not
-   assumed (open question Q9).
+1. **Request rule (deterministic). Implemented.** `role: coder` with
+   `agent: claude` is rejected, and `agent: auto` for a coder resolves to Codex.
+   The rejection shows in `request-status`; the rule string today is `Claude
+   cannot run the coder role`. A stable `coding requires Codex` string is not
+   required unless the user wants it.
+2. **Verdict rule. Implemented.** The verdict parser rejects any model verdict
+   that sets a coder to Claude, or that changes the requested agent or role,
+   whatever the model returns.
+3. **No substitution across providers for coding. Implemented.** The
+   Codex-to-Claude entries are gone from the substitution table. When Codex is
+   limited, the coder request waits as `queued_usage_limit`, never moved.
+   Visible deferral reasons and retry times are still missing (M2, M3).
+4. **Claude EPM jobs get document-only write access. Not implemented (G3).**
+   Claude EPM jobs run with Edit and Write limited to the task's `owns` paths,
+   and the launcher rejects any task whose `owns` includes a code path. The
+   mechanism is path-limited tool permissions if the Claude CLI supports them;
+   if it does not, the mechanism is the L2 approval socket, and M1c ships
+   read-only EPM tools until L2 exists. This must be verified, not assumed
+   (open question Q9).
 5. **Bash for Claude jobs** stays on the existing short allowlist (build, test
    and read-only Git commands). No shell redirection or interpreter that could
    write code is on it.
@@ -152,7 +215,8 @@ Enforce in layers, because a prompt alone does not enforce anything.
 
 Failure behavior: an enforcement failure is a rejection or a deferral, never a
 fallback to a different executor. A usage limit never authorizes the master or
-Claude to code.
+Claude to code. The sub-minute exception is about task size, not provider
+state: a limited Codex coder does not make a longer task eligible for R-direct.
 
 ## Queues and lifecycle
 
@@ -161,7 +225,7 @@ Three queues are needed. Only the first exists.
 | Queue | Holds | Executor | Status |
 | --- | --- | --- | --- |
 | Launch queue | `launch/v1` requests for worker jobs | Launcher | Exists (spool) |
-| Local queue | `local/v1` decision-tree tasks | Pinned local model, one at a time | Needed (M5) |
+| Local queue | `local/v1` bounded tasks, durable, with telemetry (`LOCAL-FEEDBACK.md`) | Pinned local model, one at a time | Needed; first slice is M5a |
 | Schedule registry | Cron or timer entries | Scheduler, no model | Needed (M4), gated on Q1 to Q3 |
 
 Proposed unified record for any queued item:
@@ -232,9 +296,14 @@ the model only chooses among enumerated branches**:
 - A playbook that needs to author or change code does not run locally. It emits
   an R-code request for a fresh Codex coder through the normal launcher.
 
-Whether a local EPM is in scope at all, or the local model should remain a
+The queue, its task classes, the time budget and telemetry record, the review
+grades, and the way frontier agents choose trial tasks and adjust thresholds
+are specified in `LOCAL-FEEDBACK.md`. The measured trial starts with single-step
+tasks (one prompt, one validated result), which need no tools and no playbook
+engine, and grows toward multi-step playbooks only for classes that have earned
+it. Whether a local EPM is in scope at all, or the local model should remain a
 dispatcher and playbook runner, is the existing open question in `LAUNCHER.md`
-(L3) and is repeated below.
+(L3) and is repeated below. The trial does not need that answer.
 
 ## Usage and concurrency backpressure
 
@@ -268,13 +337,15 @@ Existing: the caps and reactive detection listed above. Proposed additions:
 
 ## Relation to GUP work
 
-Claude has suggested starting GUP revenue work. This routing system is to
-precede it. Requirements for that ordering:
+Claude has suggested starting GUP revenue work. The user said this routing
+system should precede it. This document does not decide how much routing must
+exist first, and it adds no gate of its own:
 
-- No GUP task is created, scheduled or routed until the user accepts a named
-  routing milestone. Proposed gate: M1 through M3 accepted (Codex-only coding,
-  a visible fair queue, and backpressure). The user chooses the gate (Q10).
-- GUP work, when it starts, goes through these routes like any other work.
+- Whether GUP work waits for any milestone below, and which one, is the user's
+  decision (Q10). Until the user answers, this draft neither blocks nor starts
+  GUP work.
+- GUP work, when it starts, goes through these routes like any other work:
+  Codex master, Claude EPM, fresh Codex coders.
 - This design does not read, change, deploy or publish anything in GUP, and it
   adds no financial or publishing automation.
 
@@ -287,25 +358,43 @@ tag by the integrator. Test names below are proposed names for the worker to
 create.
 
 **M0: decisions and guide update (documents only).**
-Deliverable: the user's answers to Q1 to Q6 and Q10 recorded in this file;
-`~/AGENTS.md` edited (user-approved) to say coding workers are Codex-only for
-EPM-managed work.
-Acceptance: `grep -nE '^- Q(1|2|3|4|5|6|10)\.' docs/ROUTING.md` prints nothing
-(those questions moved to a dated "Decisions" section with the user's words),
-and `grep -n 'may choose Codex or Claude' ~/AGENTS.md` no longer describes
-coding as a free choice.
+Guide update: **done.** `~/AGENTS.md` now says (a) the Codex master may edit code
+itself only for a task under one minute, (b) Claude instances are EPMs from
+their first turn and never code, and (c) coding workers are Codex only. The
+phrase `may choose Codex or Claude` no longer appears in it.
+Remaining deliverable: the user's answers to Q1 to Q6, Q10 and Q15 recorded in
+this file. The cron (Q1 to Q3), voice (Q8), GUP timing (Q10) and trial-default
+questions are still open; the guide edit does not answer them.
+Acceptance: `grep -nE '^- Q(1|2|3|4|5|6|10|15)\.' docs/ROUTING.md` prints
+nothing (those questions moved to a dated "Decisions" section with the user's
+words).
 
-**M1: Codex-only coding enforcement (code, launcher, profiles).**
-Acceptance:
-- `go test ./... -run 'TestCoderRequiresCodex|TestNoCrossProviderCodingSubstitution|TestVerdictRejectsClaudeCoder|TestEPMWriteScope|TestDocJobRejectsCodePaths'` passes.
-- `agent-bridge request --file` with `role: coder, agent: claude` ends with
-  `request-status` showing `rejected` and rule `coding requires Codex`.
-- With a fake snapshot showing Codex `halted_usage`, a `codex-std` coder request
-  is `deferred`, and no `claude-*` job is created.
+**M1a: Codex-only coder launches (landed, v0.20.1).**
+`validAgentRole` rejects a Claude coder in requests, hard rules, verdicts, user
+approvals and direct `start`; the Codex-to-Claude substitution is removed; a
+limited-Codex coder request waits as `queued_usage_limit`. Covered by the tests
+added in v0.20.1 in `launcher_test.go` and `main_test.go`. Do not redo.
+
+**M1b: Claude defaults to EPM (landed, v0.20.2).**
+`start --agent claude` selects role `epm` and profile `claude-epm` when neither
+is given; `--agent claude --role coder` still fails; help text states the
+defaults. Covered by `TestStartRole`, `TestStartClaudeDefaultsToEPM` and
+`TestStartRejectsClaudeCoder`. Do not redo.
+
+**M1c: EPM write scope and audit (code, launcher, Claude tool args).**
+Closes G3 and layers 4, 7 and 8 above. Acceptance:
+- `go test ./... -run 'TestEPMWriteScope|TestDocJobRejectsCodePaths|TestClaudeJobViolationAudit'` passes.
 - A Claude EPM test job asked to write `main.go` is denied; writing under
   `docs/` is allowed.
 - A Claude job whose worktree has a changed non-document path ends as
   `violation` and `agent-bridge show` reports it.
+- A coder request while Codex is exhausted stays queued and no `claude-*` job is
+  created (regression guard for v0.20.1).
+
+**M1d: sub-minute exception record (documents; code only if the user wants
+enforcement).** After Q15, add the evidence format to the status line and the
+guide. No bridge change is proposed, because the bridge cannot see the master's
+edits.
 
 **M2: queue visibility and fairness (code, launcher, monitor, watch).**
 Acceptance:
@@ -326,7 +415,7 @@ Acceptance:
 - No test or run path ever changes a coder's agent to Claude.
 
 **M4: routes and schedule registry (design plus code, gated on Q1 to Q3).**
-Deliverable: a `route` field (`launch/v2`), the R-doc document job path, and the
+Deliverable: a `route` field (`launch/v2`), the R-doc path (a Claude EPM whose `owns` are documents only), and the
 schedule registry with the cron semantics the user chose.
 Acceptance:
 - `go test ./... -run 'TestRouteValidation|TestDocRouteCodePathRejected|TestScheduleRegistry'` passes.
@@ -337,9 +426,30 @@ Acceptance:
 - The scheduled job runs with no model call, and its exit status and log are
   readable through `agent-bridge show`.
 
-**M5: local queue and playbooks (L3, code).**
-Acceptance:
-- `go test ./... -run 'TestLocalQueueSerial|TestLocalLabelValidation|TestLocalGPUYieldPause|TestLocalCannotWriteCode'` passes.
+**M5a: measured local trial, first slice (code, new files only).**
+Prioritized by the user's latest instruction (objective 11). A durable, serial
+local queue with objective telemetry and no subjective grading: `local-queue
+submit`, `run`, `status`, `cancel` and `report`, finite retries, timeouts, and
+automatic validity checks (output parses, label in the allowed set, output size
+limit). Scoped task: `/tmp/agent-bridge-local-feedback-code-task.md`; the design
+is `LOCAL-FEEDBACK.md`, milestone A. Acceptance:
+- `go test ./... -run 'TestLocalQueue'` passes (serial order, retry limit,
+  timeout, cancel, restart recovery, no raw prompt in telemetry by default).
+- `agent-bridge local-queue status` shows depth, the running task and the oldest
+  age; `local-queue report` prints per-class counts, valid rate and wall-time
+  percentiles from telemetry.
+- Telemetry never contains prompt or output text unless a debug flag is set.
+
+**M5b: frontier review and routing report (code and documents).**
+`LOCAL-FEEDBACK.md` milestones B and C: review grades and rescue cost recorded by
+a frontier reviewer, a baseline and holdout for each class, and a report that
+proposes threshold changes. Frontier agents apply a proposal; the bridge never
+changes a threshold on its own.
+
+**M5c: decision-tree playbooks and L3 execution (code).**
+`LOCAL-FEEDBACK.md` milestones D and E, plus the original queue-and-playbook
+scope. Acceptance:
+- `go test ./... -run 'TestLocalLabelValidation|TestLocalGPUYieldPause|TestLocalCannotWriteCode'` passes.
 - `agent-bridge local-model yield -- sleep 5` pauses the local queue with reason
   `gpu_yield` and resumes it afterwards.
 - A model label outside the allowed set is rejected and retried, then escalated.
@@ -347,20 +457,31 @@ Acceptance:
   Orbital Drift consumer or is gated by a feed version bump.
 
 **M6: tool approval (L2, code).** Already planned in `LAUNCHER.md`; schedule it
-before M1 if Q9 shows the Claude CLI cannot limit Edit and Write by path.
+before M1c if Q9 shows the Claude CLI cannot limit Edit and Write by path.
 Acceptance: as in `LAUNCHER.md` (allow, deny and ask paths, with a deny on
 approval-socket failure).
 
-Order: M0, M1 (with M6 first if needed), M2, M3, then M4 and M5 as the user's
-answers allow. The proposed GUP gate is after M3.
+Proposed order: M1b (landed), then **M5a** (the measured local
+trial; it touches only new files, so it can run beside M0 and M1c without
+overlap), M0 (the guide edit is done; the user's answers remain), M5b once M5a has produced
+real records, M1c (with M6 first if needed), M2, M3, then M4 as the user's
+answers allow and M5c once at least one class has passed its holdout. The local
+model should not stay at L3 "later": the trial is cheap, needs no new user
+decision, and produces the data that tells us what L3 should contain. M4 stays
+gated on Q1 to Q3. Where GUP work fits in this order is the user's decision
+(Q10); this order does not decide it.
 
 ## Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| Prompt-only limits on Claude EPMs let code slip through | Layers 4 to 7 above; the audit blocks integration |
+| Prompt-only limits on Claude EPMs let code slip through (G3 is open) | Layers 4, 7 and 8 above; the audit blocks integration |
+| The sub-minute exception grows into routine master coding | Honor-system today (G13); the master states estimate and elapsed time; the user can drop the exception (Q15) |
+| Claude becomes the EPM default but tool access still allows edits | Default role change is a labelling fix, not enforcement; M1c is the enforcement |
 | Removing Claude coding makes work wait when Codex is limited | Deferral with visible reason and retry time; the user may change the rule |
 | Local model mislabels a branch | Enumerated labels, bounded retries, escalation, no file or shell tools |
+| Local trial work is graded by the same frontier agent that routes it, and thresholds overfit | Objective validity checks first, a baseline and a holdout per class, thresholds changed only by an agent with a recorded report (`LOCAL-FEEDBACK.md`) |
+| Local trial stores sensitive prompts | Telemetry holds sizes, hashes, counts and labels, not text, by default; raw capture is off and time-limited |
 | Classifier or local verdict sends work to an expensive route | Model may only go cheaper within a route; ceilings stay deterministic |
 | Queue grows silently | Queue section in snapshot and `watch`; ttl and expiry |
 | Head-of-line fix reorders work | Per-provider FIFO is explicit and tested |
@@ -393,14 +514,27 @@ Pending user clarification. None of these is assumed answered.
   access, and `--agent codex` is read-only. This draft makes no voice design
   decision.
 - Q9. Does the Claude CLI permission system support path-limited Edit and Write
-  for a headless job? If not, L2 must come before M1. This needs a check by a
+  for a headless job? If not, L2 must come before M1c. This needs a check by a
   worker, not an assumption.
-- Q10. Which milestone gates the start of GUP revenue work? Proposed: M3.
+- Q10. Should GUP revenue work wait for any routing milestone, and if so which
+  one? No gate is proposed here; this is your call.
 - Q11. Default numbers for the Codex cap, throttle windows and `token_budget`,
   and where to read your real plan limits.
-- Q12. Should `claude-quick` and `claude-std` be retired for coders and kept only
-  for document jobs, or renamed?
+- Q12. `claude-quick` and `claude-std` can no longer hold a coder. Should they be
+  retired, renamed, or kept as cheaper EPM or documentation profiles?
 - Q13. May a Claude EPM fall back to Codex for planning when Claude is limited,
   or must it wait?
 - Q14. Is it acceptable that integration remains with the Codex master, as in
   `LAUNCHER.md` today?
+- Q15. The under-one-minute exception: who estimates the minute, does it include
+  checks, the version bump and the commit, and does it cover every non-document
+  path or only small edits to existing files? Should the master record the
+  estimate and elapsed time in its status line?
+- Q16. "Right off the bat" for Claude: does every Claude entry point (`start`,
+  launcher requests, the voice daemon, an interactive Claude session) start as
+  an EPM? `start` and launcher requests do as of v0.20.2; the others are
+  unchanged.
+- Q17. Local trial defaults (proposed values are in `LOCAL-FEEDBACK.md`): the
+  holdout share, the retention period for telemetry, whether raw prompt capture
+  may ever be switched on, and whether the trial may run while a GPU render
+  holds a lease (the proposal is no: the queue waits).

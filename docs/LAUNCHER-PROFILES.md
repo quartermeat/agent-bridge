@@ -16,10 +16,18 @@ Status: implemented 2026-10-26 on the launcher branch.
 | `codex-quick` | codex | `gpt-6-sol` | low | 20 min | mechanical edits, renames, test fixes |
 | `codex-std` | codex | `gpt-6-sol` | medium | 60 min | normal scoped implementation (default coder) |
 | `codex-deep` | codex | `gpt-6-sol` | high | 120 min | hard bugs, subsystem work |
-| `claude-quick` | claude | `claude-haiku-5-5` | low | 20 min | small edits, doc-adjacent code |
-| `claude-std` | claude | `claude-sonnet-5-5` | medium | 60 min | implementation needing judgment |
-| `claude-epm` | claude | `claude-sonnet-5-5` | high | 180 min | EPM: plan, split, request, review |
-| `claude-deep` | claude | `claude-opus-5-5` | high | 120 min | design-heavy or cross-cutting work; user-approved only |
+| `claude-quick` | claude | `claude-haiku-5-5` | low | 20 min | not usable (see below) |
+| `claude-std` | claude | `claude-sonnet-5-5` | medium | 60 min | not usable (see below) |
+| `claude-epm` | claude | `claude-sonnet-5-5` | high | 180 min | EPM: plan, split, request, review (default EPM) |
+| `claude-deep` | claude | `claude-opus-5-5` | high | 120 min | EPM for design-heavy or cross-cutting planning; user-approved only |
+
+Coders are Codex only. Since v0.20.1 `start` rejects `--agent claude --role coder`,
+and an `epm` job accepts only `claude-epm` or `claude-deep`. That leaves
+`claude-quick` and `claude-std` with no valid role, so no job can run under them.
+They are still listed in `packaging/profiles.yaml` and in the cost order;
+removing them is a code change for the coding worker and is not done here.
+Claude profiles are for documents, requirements, schedules and EPM planning,
+never for runnable code.
 
 - Model and effort map to `--model` / `--effort` for `claude -p`, and to
   `-m` / `-c model_reasoning_effort=` for `codex exec`.
@@ -34,18 +42,24 @@ Status: implemented 2026-10-26 on the launcher branch.
 - **Concurrency:** at most 4 live launcher jobs in total, at most 2 Claude, and at most
   1 of `claude-deep`. A request over a cap waits in the spool (FIFO) and is not rejected.
 - **Ceiling by requester:** a coordinator can grant any profile except
-  `claude-deep`. An EPM's children are capped at `claude-std` / `codex-deep`.
-  A sub-EPM is `claude-epm`, and its depth counts toward the depth cap.
+  `claude-deep`, but may only request an EPM, so in practice `claude-epm`.
+  An EPM cannot request `claude-deep`. Without a requested profile the ceiling
+  is the role's default: `codex-std` for a coder, `claude-epm` for an EPM. The
+  model's choice may not rank above the ceiling. A sub-EPM is `claude-epm`, and
+  its depth counts toward the depth cap.
 - **Routing preference:** the local model picks the cheapest profile that fits.
   The order is `codex-quick` < `claude-quick` < `codex-std` < `claude-std` <
-  `codex-deep` < `claude-epm` < `claude-deep`. Codex is preferred for plain
-  coding and Claude for tasks that need managing or judgment.
-- **Usage limits:** if a provider's recent jobs show `halted_usage`, the
-  launcher routes new work to the other provider's equivalent profile and
-  logs the substitution. It never upgrades a profile to work around a limit.
+  `codex-deep` < `claude-epm` < `claude-deep`. Every coder is Codex
+  (`codex-quick`, `codex-std`, `codex-deep`); Claude profiles are for EPMs only.
+- **Usage limits:** if Codex shows `halted_usage` or a recent `usage_limit` halt,
+  a coder request is queued and retried. It is never moved to a Claude profile,
+  because Claude cannot be a coder. Codex-to-Codex downgrades are the only
+  substitution a coder can get. The launcher never upgrades a profile to work
+  around a limit.
 - **Local model:** the dispatcher/approver runs `qwen3-coder:30b` with
   temperature 0, a 30 s timeout per verdict and one request at a time. A timeout
-  escalates.
+  escalates. Queued bounded tasks for this model, and the measurements that
+  decide which classes it keeps, are proposed in `LOCAL-FEEDBACK.md`.
 
 ## Recording
 

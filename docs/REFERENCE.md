@@ -155,7 +155,7 @@ large line-hash state or running Git for every viewer refresh.
 
 ## Launcher L1
 
-`agent-bridge start` accepts `--agent codex|claude` and `--role coder|epm`. Defaults are Codex and coder; Codex EPM is rejected. Jobs contain `agent`, `role`, and `depth`, including `list`, `show`, `snapshot`, and `watch`. Legacy jobs read as Codex/coder/depth 0.
+`agent-bridge start` accepts `--agent codex|claude` and `--role coder|epm`. The default agent is Codex. `--agent claude` defaults to role `epm` and profile `claude-epm`; Codex defaults to role `coder` and profile `codex-std`. Codex EPM and Claude coder are rejected. Jobs contain `agent`, `role`, and `depth`, including `list`, `show`, `snapshot`, and `watch`. Legacy jobs read as Codex/coder/depth 0.
 
 `start --profile NAME` selects a profile from `packaging/profiles.yaml`, or the user override at `~/.config/agent-bridge/profiles.yaml` (`AGENT_BRIDGE_PROFILES` overrides the path). Jobs record `profile`, `model`, `effort`, `time_limit`, and `substitution`. The worker halts at its wall clock limit with `halt.code: time_limit`. A launch request may set `profile` as a ceiling, and `approve --profile NAME ID` can override it. The launcher keeps requests over its total, Claude, or Claude-deep cap queued in FIFO order. See [LAUNCHER-PROFILES.md](LAUNCHER-PROFILES.md).
 

@@ -186,13 +186,23 @@ func writeJob(j Job) error {
 	return os.Rename(tmp, filepath.Join(dir, "job.json"))
 }
 
+func startRole(agent, role string) string {
+	if role != "" {
+		return role
+	}
+	if agent == "claude" {
+		return "epm"
+	}
+	return "coder"
+}
+
 func start(args []string) error {
 	f := flag.NewFlagSet("start", flag.ContinueOnError)
 	cwd := f.String("cwd", "", "Git worktree or project directory")
 	name := f.String("name", "", "Short job label")
 	write := f.Bool("write", false, "Allow workspace-write sandbox")
 	agent := f.String("agent", "codex", "Backend: codex for coder, claude for EPM")
-	role := f.String("role", "coder", "Role: coder or epm")
+	role := f.String("role", "", "Role: coder or epm (default: epm with --agent claude, coder with --agent codex)")
 	profileName := f.String("profile", "", "Named job profile")
 	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
 	spawnedBy := f.String("spawned-by", "", "Agent ID from snapshot; default: detect invoking agent")
@@ -203,6 +213,7 @@ func start(args []string) error {
 	if err := f.Parse(args); err != nil {
 		return err
 	}
+	*role = startRole(*agent, *role)
 	if *cwd == "" {
 		return errors.New("--cwd is required")
 	}

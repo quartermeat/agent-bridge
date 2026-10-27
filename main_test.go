@@ -72,6 +72,9 @@ func TestStartAndObserve(t *testing.T) {
 	if job.Status != "completed" {
 		t.Fatalf("status = %q, error = %q", job.Status, job.Error)
 	}
+	if job.Role != "coder" || job.Profile != "codex-std" {
+		t.Fatalf("default Codex role/profile = %q/%q", job.Role, job.Profile)
+	}
 	if job.ExitCode == nil || *job.ExitCode != 0 {
 		t.Fatalf("exit code = %v", job.ExitCode)
 	}
@@ -87,9 +90,85 @@ func TestStartAndObserve(t *testing.T) {
 	}
 }
 
+func TestStartRole(t *testing.T) {
+	for _, tt := range []struct {
+		agent, role, want string
+	}{
+		{"claude", "", "epm"},
+		{"codex", "", "coder"},
+		{"claude", "epm", "epm"},
+		{"claude", "coder", "coder"},
+		{"codex", "coder", "coder"},
+	} {
+		if got := startRole(tt.agent, tt.role); got != tt.want {
+			t.Errorf("startRole(%q, %q) = %q, want %q", tt.agent, tt.role, got, tt.want)
+		}
+	}
+}
+
+func TestStartClaudeDefaultsToEPM(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "agent-bridge")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	fake := filepath.Join(tmp, "fake-claude")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\ncat >/dev/null\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(tmp, "state")
+	activity := filepath.Join(tmp, "activity")
+	if err := os.Mkdir(activity, 0700); err != nil {
+		t.Fatal(err)
+	}
+	spawnerID := "claude-test-parent"
+	activityRecord, _ := json.Marshal(map[string]any{"id": spawnerID, "name": "Claude", "phase": "waiting", "sampledAt": time.Now().UTC()})
+	if err := os.WriteFile(filepath.Join(activity, spawnerID+".json"), activityRecord, 0600); err != nil {
+		t.Fatal(err)
+	}
+	start := exec.Command(bin, "start", "--cwd", tmp, "--name", "epm-default", "--agent", "claude", "--spawned-by", spawnerID)
+	start.Env = append(os.Environ(), "AGENT_BRIDGE_STATE_DIR="+state, "AGENT_BRIDGE_ACTIVITY_DIR="+activity, "AGENT_BRIDGE_CLAUDE_BIN="+fake, "AGENT_BRIDGE_LAUNCH_MODE=direct")
+	start.Stdin = strings.NewReader("Report status.")
+	out, err := start.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v: %s", err, out)
+	}
+	id := strings.TrimSpace(string(out))
+	wait := exec.Command(bin, "wait", "--interval", "100ms", id)
+	wait.Env = start.Env
+	waitOut, waitErr := wait.Output()
+	var waited []Job
+	if err := json.Unmarshal(waitOut, &waited); err != nil || len(waited) != 1 {
+		t.Fatalf("wait: %v, result: %v: %s", waitErr, err, waitOut)
+	}
+	if waited[0].Status != "completed" && waited[0].Status != "failed" {
+		t.Fatalf("wait status = %q, error = %v", waited[0].Status, waitErr)
+	}
+	show := exec.Command(bin, "show", id)
+	show.Env = start.Env
+	showOut, err := show.Output()
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	var job Job
+	if err := json.Unmarshal(showOut, &job); err != nil {
+		t.Fatalf("show result: %v: %s", err, showOut)
+	}
+	if job.Role != "epm" || job.Agent != "claude" || job.Profile != "claude-epm" {
+		t.Fatalf("default Claude role/agent/profile = %q/%q/%q", job.Role, job.Agent, job.Profile)
+	}
+}
+
 func TestStartRejectsClaudeCoder(t *testing.T) {
 	if err := start([]string{"--cwd", t.TempDir(), "--agent", "claude", "--role", "coder"}); err == nil || !strings.Contains(err.Error(), "Claude cannot run the coder role") {
 		t.Fatalf("Claude coder start: %v", err)
+	}
+	if err := start([]string{"--cwd", t.TempDir(), "--agent", "codex", "--role", "epm"}); err == nil || !strings.Contains(err.Error(), "Codex cannot run the epm role") {
+		t.Fatalf("Codex EPM start: %v", err)
+	}
+	if err := start([]string{"--cwd", t.TempDir(), "--role", "boss"}); err == nil || !strings.Contains(err.Error(), "invalid role") {
+		t.Fatalf("invalid role start: %v", err)
 	}
 	if err := validAgentRole("claude", "epm"); err != nil {
 		t.Fatalf("Claude EPM: %v", err)
