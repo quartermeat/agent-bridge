@@ -18,6 +18,7 @@ import (
 type tokenFeed struct {
 	Claude   int64
 	Codex    int64
+	Local    int64
 	Sessions map[string]int64
 }
 
@@ -55,7 +56,7 @@ func loadTokenFeed() (tokenFeed, error) {
 				return f, err
 			}
 			sampled = true
-		case len(parts) == 2 && (parts[0] == "claude" || parts[0] == "codex"):
+		case len(parts) == 2 && (parts[0] == "claude" || parts[0] == "codex" || parts[0] == "local"):
 			n, err := strconv.ParseInt(parts[1], 10, 64)
 			if err != nil || n < 0 {
 				return f, errors.New("invalid token total")
@@ -63,11 +64,13 @@ func loadTokenFeed() (tokenFeed, error) {
 			if parts[0] == "claude" {
 				f.Claude = n
 				claude = true
-			} else {
+			} else if parts[0] == "codex" {
 				f.Codex = n
 				codex = true
+			} else {
+				f.Local = n
 			}
-		case len(parts) == 4 && parts[0] == "session" && (parts[1] == "claude" || parts[1] == "codex") && parts[2] != "":
+		case len(parts) == 4 && parts[0] == "session" && (parts[1] == "claude" || parts[1] == "codex" || parts[1] == "local") && parts[2] != "":
 			n, err := strconv.ParseInt(parts[3], 10, 64)
 			if err != nil || n < 0 {
 				return f, errors.New("invalid session total")
@@ -88,7 +91,7 @@ func loadTokenFeed() (tokenFeed, error) {
 
 func (f *tokenFeed) addSnapshot(s Snapshot) {
 	for _, a := range s.Agents {
-		if !a.UsageKnown || a.SessionID == "" || (a.Provider != "claude" && a.Provider != "codex") || strings.ContainsAny(a.SessionID, "\t\n\r") {
+		if !a.UsageKnown || a.SessionID == "" || (a.Provider != "claude" && a.Provider != "codex" && a.Provider != "local") || strings.ContainsAny(a.SessionID, "\t\n\r") {
 			continue
 		}
 		current := a.Usage.Input + a.Usage.Output
@@ -104,8 +107,10 @@ func (f *tokenFeed) addSnapshot(s Snapshot) {
 		f.Sessions[key] = current
 		if a.Provider == "claude" {
 			f.Claude += delta
-		} else {
+		} else if a.Provider == "codex" {
 			f.Codex += delta
+		} else {
+			f.Local += delta
 		}
 	}
 }
@@ -119,7 +124,7 @@ func (f tokenFeed) publish(sampledAt time.Time) error {
 		return err
 	}
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "agent-bridge-token-feed\t1\nsampled_at\t%s\nclaude\t%d\ncodex\t%d\n", sampledAt.Format(time.RFC3339Nano), f.Claude, f.Codex)
+	fmt.Fprintf(&b, "agent-bridge-token-feed\t1\nsampled_at\t%s\nclaude\t%d\ncodex\t%d\nlocal\t%d\n", sampledAt.Format(time.RFC3339Nano), f.Claude, f.Codex, f.Local)
 	keys := make([]string, 0, len(f.Sessions))
 	for key := range f.Sessions {
 		keys = append(keys, key)

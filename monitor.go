@@ -81,6 +81,10 @@ type activityFile struct {
 	ReportOrigin string       `json:"report_origin"`
 	Target       *AgentTarget `json:"target"`
 	SampledAt    time.Time    `json:"sampledAt"`
+	Model        string       `json:"model,omitempty"`
+	SessionID    string       `json:"session_id,omitempty"`
+	UsageKnown   bool         `json:"usage_known,omitempty"`
+	Usage        TokenUsage   `json:"usage,omitempty"`
 }
 
 func monitorHome() (string, error) {
@@ -137,14 +141,19 @@ func collectSnapshot() (Snapshot, error) {
 				provider = "claude"
 			case strings.HasPrefix(a.ID, "codex-"):
 				provider = "codex"
+			case strings.HasPrefix(a.ID, "local-"):
+				provider = "local"
 			default:
 				continue
 			}
-			s.Agents = append(s.Agents, AgentUsage{ID: a.ID, Provider: provider, Name: a.Name, Phase: a.Phase, Detail: a.Detail, ReportOrigin: a.ReportOrigin, Target: a.Target, HostPID: hostPID, SampledAt: a.SampledAt})
+			s.Agents = append(s.Agents, AgentUsage{ID: a.ID, Provider: provider, Name: a.Name, Phase: a.Phase, Detail: a.Detail, ReportOrigin: a.ReportOrigin, Target: a.Target, HostPID: hostPID, SampledAt: a.SampledAt, Model: a.Model, SessionID: a.SessionID, UsageKnown: a.UsageKnown, Usage: a.Usage})
 		}
 	}
 	for i := range s.Agents {
 		a := &s.Agents[i]
+		if a.Provider == "local" {
+			continue
+		}
 		path := findSessionFile(home, a.Provider, a.ID, now)
 		if path == "" {
 			continue
@@ -195,6 +204,19 @@ func collectSnapshot() (Snapshot, error) {
 		classifyAgent(&s.Agents[i], s.Jobs)
 	}
 	collectGPU(&s)
+	for _, model := range s.LocalModels {
+		found := false
+		for _, a := range s.Agents {
+			if a.Provider == "local" && a.Model == model.Name && a.ActivityState == "active" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.Agents = append(s.Agents, AgentUsage{ID: "local-ollama-" + model.Name, Provider: "local", Name: "ollama", Model: model.Name, Phase: "loaded", ActivityState: "loaded", StateDetail: "model loaded by Ollama", SampledAt: now, ActiveJobIDs: []string{}, HaltedJobIDs: []string{}})
+		}
+	}
+	sort.Slice(s.Agents, func(i, j int) bool { return s.Agents[i].ID < s.Agents[j].ID })
 	if status, err := cachedSteinberger(now); err == nil {
 		s.Steinberger = &status
 		s.Sources = append(s.Sources, SourceStatus{Name: "steinberger", Available: true})
@@ -216,7 +238,7 @@ func classifyAgent(a *AgentUsage, jobs []Job) {
 	workerRunning, childRunning := false, false
 	for _, j := range jobs {
 		isWorker := a.Provider == "codex" && j.SessionID != "" && j.SessionID == a.SessionID
-		isParent := j.SpawnedBy != nil && j.SpawnedBy.AgentID == a.ID
+		isParent := j.SpawnedBy != nil && j.SpawnedBy.AgentID == a.ID || j.RequestedBy != nil && j.RequestedBy.AgentID == a.ID
 		if j.Status == "halted" && j.AcknowledgedAt == nil && (isWorker || isParent) {
 			a.HaltedJobIDs = append(a.HaltedJobIDs, j.ID)
 		}
@@ -249,6 +271,8 @@ func classifyAgent(a *AgentUsage, jobs []Job) {
 		a.ActivityState, a.StateDetail = "halted_usage", "spawned job halted by token or usage limit"
 	case a.ReportOrigin == "event" && ((a.Phase == "waiting" && a.Detail == "ready for direction") || (a.Phase == "idle" && a.Detail == "session ready")):
 		a.ActivityState, a.StateDetail = "ready", "turn completed; waiting for direction"
+	case a.Provider == "local" && a.Phase == "idle":
+		a.ActivityState, a.StateDetail = "idle", a.Detail
 	default:
 		a.ActivityState, a.StateDetail = "unverified", "hook is quiet; readiness unverified"
 	}
@@ -256,6 +280,12 @@ func classifyAgent(a *AgentUsage, jobs []Job) {
 
 func activityCurrent(path string, a activityFile, now time.Time) (int, bool) {
 	age := now.Sub(a.SampledAt)
+	if strings.HasPrefix(a.ID, "local-") {
+		if a.Phase == "idle" {
+			return 0, age <= time.Hour
+		}
+		return 0, a.Phase == "working" && age <= 5*time.Second
+	}
 	switch a.Phase {
 	case "thinking", "working", "tool":
 		if age > 5*time.Second {
@@ -486,7 +516,7 @@ func watchCommand(args []string) error {
 			}
 		}
 		fmt.Print("\x1b[H\x1b[2J")
-		fmt.Printf("Claude / Codex activity — %s UTC (%s; Ctrl-C to exit)\n\n", s.SampledAt.Format("15:04:05"), origin)
+		fmt.Printf("Claude / Codex / local activity — %s UTC (%s; Ctrl-C to exit)\n\n", s.SampledAt.Format("15:04:05"), origin)
 		if s.Steinberger != nil && s.Steinberger.Health != "healthy" {
 			fmt.Printf("*** STEINBERGER UNHEALTHY: %s ***\n", s.Steinberger.Reason)
 		}
@@ -508,11 +538,11 @@ func watchCommand(args []string) error {
 			}
 		}
 		if len(s.Agents) == 0 {
-			fmt.Println("No fresh Claude or Codex activity hooks.")
+			fmt.Println("No fresh agent activity.")
 		}
 		for _, a := range s.Agents {
 			prior, seen := previous[a.ID]
-			fmt.Printf("%-7s %-20s %-20s %s\n", a.Name, a.ActivityState, a.Model, a.Cwd)
+			fmt.Printf("%-7s %-20s %-20s %s\n", a.Provider, a.ActivityState, a.Model, a.Cwd)
 			if !a.UsageKnown {
 				fmt.Print("  usage pending")
 			} else {
@@ -537,7 +567,13 @@ func watchCommand(args []string) error {
 			fmt.Println("  none in the last hour")
 		}
 		for _, j := range s.Jobs {
-			fmt.Printf("  %-24s %-10s %s", j.ID, j.Status, j.Name)
+			fmt.Printf("  %-24s %-10s %s  %s/%s depth %d", j.ID, j.Status, j.Name, j.Agent, j.Role, j.Depth)
+			if j.Profile != "" {
+				fmt.Printf("  %s %s/%s limit %s", j.Profile, j.Model, j.Effort, j.TimeLimit)
+			}
+			if j.Substitution != "" {
+				fmt.Printf("  substituted from %s", j.Substitution)
+			}
 			if j.Usage != nil {
 				fmt.Printf("  input %d output %d", j.Usage.Input, j.Usage.Output)
 			}

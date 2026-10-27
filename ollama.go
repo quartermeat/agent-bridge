@@ -10,9 +10,38 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
+
+var localCompletionCounter atomic.Uint64
+var localModelSerial sync.Mutex
+
+type localActivityRoleKey struct{}
+type localActivityIDKey struct{}
+
+func localActivityPath(role, model string) (string, activityFile, error) {
+	home, err := monitorHome()
+	if err != nil {
+		return "", activityFile{}, err
+	}
+	dir := activityDir(home)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", activityFile{}, err
+	}
+	clean := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, strings.ToLower(model))
+	id := fmt.Sprintf("local-%s-%s-%d-%d", role, clean, os.Getpid(), localCompletionCounter.Add(1))
+	return filepath.Join(dir, id+".json"), activityFile{ID: id, Name: role, Phase: "working", Detail: role + " completion", Model: model, SampledAt: time.Now().UTC()}, nil
+}
 
 // Replaced by a fake transport in tests; requests still use the real HTTP path.
 var ollamaHTTPClient = &http.Client{}
@@ -75,12 +104,53 @@ func ollamaListModels(ctx context.Context, base string) error {
 }
 
 func ollamaCompletion(ctx context.Context, base, model, system, prompt string) (string, TokenUsage, int, string, error) {
+	localModelSerial.Lock()
+	defer localModelSerial.Unlock()
+	role := "completion"
+	if value, ok := ctx.Value(localActivityRoleKey{}).(string); ok && value != "" {
+		role = value
+	}
+	path, activity, activityErr := localActivityPath(role, model)
+	if destination, ok := ctx.Value(localActivityIDKey{}).(*string); ok && activityErr == nil {
+		*destination = activity.ID
+	}
+	if activityErr == nil {
+		_ = writeJSONPrivate(path, activity)
+		stop, done := make(chan struct{}), make(chan struct{})
+		working := activity
+		defer func() {
+			close(stop)
+			<-done
+			activity.Phase = "idle"
+			activity.Detail = "completion finished"
+			activity.SampledAt = time.Now().UTC()
+			_ = writeJSONPrivate(path, activity)
+		}()
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					working.SampledAt = time.Now().UTC()
+					_ = writeJSONPrivate(path, working)
+				}
+			}
+		}()
+	}
 	messages := []map[string]string{}
 	if system != "" {
 		messages = append(messages, map[string]string{"role": "system", "content": system})
 	}
 	messages = append(messages, map[string]string{"role": "user", "content": prompt})
-	body, err := json.Marshal(map[string]any{"model": model, "messages": messages, "stream": false})
+	request := map[string]any{"model": model, "messages": messages, "stream": false}
+	if role == "dispatcher" {
+		request["options"] = map[string]any{"temperature": 0}
+	}
+	body, err := json.Marshal(request)
 	if err != nil {
 		return "", TokenUsage{}, 0, "", errors.New("cannot encode Ollama request")
 	}
@@ -108,5 +178,7 @@ func ollamaCompletion(ctx context.Context, base, model, system, prompt string) (
 	if completion.Message.Content == "" {
 		return "", TokenUsage{}, resp.StatusCode, "", errors.New("Ollama chat response contained no text")
 	}
-	return completion.Message.Content, TokenUsage{Input: completion.PromptEvalCount, Output: completion.EvalCount}, resp.StatusCode, "", nil
+	usage := TokenUsage{Input: completion.PromptEvalCount, Output: completion.EvalCount}
+	activity.Usage, activity.UsageKnown, activity.SessionID = usage, true, activity.ID
+	return completion.Message.Content, usage, resp.StatusCode, "", nil
 }

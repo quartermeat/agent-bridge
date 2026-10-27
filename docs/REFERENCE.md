@@ -139,3 +139,17 @@ large line-hash state or running Git for every viewer refresh.
 ## GPU and local models
 
 `snapshot` and the daemon's `latest` sample include NVIDIA GPU memory usage, total memory, utilization, compute-process VRAM, and loaded Ollama models when those sources are available. `watch` shows a VRAM section and highlights GPUs at 90% memory use. The `sources` entries named `nvidia-smi` and `ollama` explain unavailable data. GPU sampling requires `nvidia-smi`; Ollama sampling uses `OLLAMA_HOST` or `http://127.0.0.1:11434`. Neither service is required for the other snapshot data.
+
+## Launcher L1
+
+`agent-bridge start` accepts `--agent codex|claude` and `--role coder|epm`. Defaults are Codex and coder; Codex EPM is rejected. Jobs contain `agent`, `role`, and `depth`, including `list`, `show`, `snapshot`, and `watch`. Legacy jobs read as Codex/coder/depth 0.
+
+`start --profile NAME` selects a profile from `packaging/profiles.yaml`, or the user override at `~/.config/agent-bridge/profiles.yaml` (`AGENT_BRIDGE_PROFILES` overrides the path). Jobs record `profile`, `model`, `effort`, `time_limit`, and `substitution`. The worker halts at its wall clock limit with `halt.code: time_limit`. A launch request may set `profile` as a ceiling, and `approve --profile NAME ID` can override it. The launcher keeps requests over its total, Claude, or Claude-deep cap queued in FIFO order. See [LAUNCHER-PROFILES.md](LAUNCHER-PROFILES.md).
+
+Local Ollama completions appear as `local` agents with token usage. Ollama `/api/ps` models without an active local completion appear as passive `loaded` rows. The token feed includes a `local` total and per-session rows; older consumers can ignore these rows.
+
+Queue a launch with `agent-bridge request --file launch.yaml`; poll `agent-bridge request-status ID`. The YAML schema and hard rules are in [LAUNCHER.md](LAUNCHER.md). The private spool defaults to `/tmp/agent-bridge-$UID/spool`, or `AGENT_BRIDGE_SPOOL_DIR`. Requests and results are user-owned 0600 files.
+
+`agent-bridge launcher` polls the spool. `--once` processes one pass. It uses the Ollama model selected by `AGENT_BRIDGE_LAUNCHER_MODEL` (default `qwen3-coder:30b`). Failed or malformed model verdicts become escalations. `agent-bridge approvals` lists pending requests; `approve ID` or `deny ID` resolves them. The default timeout is 30 minutes. Decisions are logged to `~/.local/state/agent-bridge/launcher/decisions.jsonl`. The optional unit is `packaging/agent-bridge-launcher.service`; install and enable it only after configuring Ollama and verifying the worktree base paths.
+
+Claude jobs use `AGENT_BRIDGE_CLAUDE_BIN` (default `claude`) and write stream JSON events plus final text. Read-only jobs allow Read, Grep, and Glob. Write jobs allow Edit/Write and a limited build/test command list. L1 does not have the L2 tool approval socket.

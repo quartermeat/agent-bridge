@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Bridge launch dispatcher
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-bridge launcher
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

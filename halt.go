@@ -60,15 +60,28 @@ func detectJobHalt(eventsPath, stderrPath string, at time.Time, exitCode int) *H
 	var halt *Halt
 	_ = scanJSONLines(eventsPath, func(line []byte) {
 		var event struct {
-			Type    string          `json:"type"`
-			Error   json.RawMessage `json:"error"`
-			Message string          `json:"message"`
+			Type      string          `json:"type"`
+			Error     json.RawMessage `json:"error"`
+			Message   string          `json:"message"`
+			IsError   bool            `json:"is_error"`
+			Result    string          `json:"result"`
+			APIStatus int             `json:"api_error_status"`
 		}
 		if json.Unmarshal(line, &event) != nil {
 			return
 		}
 		if event.Type == "turn.completed" {
 			halt = nil
+			return
+		}
+		if event.Type == "result" && event.IsError {
+			code := ""
+			if event.APIStatus == 429 {
+				code = "rate_limit_exceeded"
+			}
+			if found := classifyUsageError(code, event.Result, "claude_event", at); found != nil {
+				halt = found
+			}
 			return
 		}
 		if event.Type != "turn.failed" && event.Type != "error" {

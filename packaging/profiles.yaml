@@ -1,0 +1,36 @@
+profiles:
+  codex-quick:
+    agent: codex
+    model: gpt-6-sol
+    effort: low
+    time_limit: 20m
+  claude-quick:
+    agent: claude
+    model: claude-haiku-5-5
+    effort: low
+    time_limit: 20m
+  codex-std:
+    agent: codex
+    model: gpt-6-sol
+    effort: medium
+    time_limit: 60m
+  claude-std:
+    agent: claude
+    model: claude-sonnet-5-5
+    effort: medium
+    time_limit: 60m
+  codex-deep:
+    agent: codex
+    model: gpt-6-sol
+    effort: high
+    time_limit: 120m
+  claude-epm:
+    agent: claude
+    model: claude-sonnet-5-5
+    effort: high
+    time_limit: 180m
+  claude-deep:
+    agent: claude
+    model: claude-opus-5-5
+    effort: high
+    time_limit: 120m

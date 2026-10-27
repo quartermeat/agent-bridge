@@ -20,7 +20,16 @@ type Job struct {
 	ID             string      `json:"id"`
 	Name           string      `json:"name"`
 	Provider       string      `json:"provider,omitempty"`
+	Agent          string      `json:"agent"`
+	Role           string      `json:"role"`
+	Profile        string      `json:"profile,omitempty"`
+	Model          string      `json:"model,omitempty"`
+	Effort         string      `json:"effort,omitempty"`
+	TimeLimit      string      `json:"time_limit,omitempty"`
+	Substitution   string      `json:"substitution,omitempty"`
+	Depth          int         `json:"depth"`
 	SpawnedBy      *Spawner    `json:"spawned_by"`
+	RequestedBy    *Spawner    `json:"requested_by,omitempty"`
 	SessionID      string      `json:"session_id,omitempty"`
 	Cwd            string      `json:"cwd"`
 	Sandbox        string      `json:"sandbox"`
@@ -58,11 +67,21 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log|_worker")
+		return errors.New("usage: agent-bridge start|request|request-status|launcher|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
 	}
 	switch args[0] {
 	case "start":
 		return start(args[1:])
+	case "request":
+		return requestCommand(args[1:])
+	case "request-status":
+		return requestStatusCommand(args[1:])
+	case "launcher":
+		return launcherCommand(args[1:])
+	case "approvals":
+		return approvalsCommand(args[1:])
+	case "approve", "deny":
+		return resolveApprovalCommand(args[0], args[1:])
 	case "ask":
 		return ask(args[1:])
 	case "list":
@@ -135,6 +154,12 @@ func readJob(id string) (Job, error) {
 	}
 	var j Job
 	err = json.Unmarshal(b, &j)
+	if j.Agent == "" {
+		j.Agent = "codex"
+	}
+	if j.Role == "" {
+		j.Role = "coder"
+	}
 	return j, err
 }
 
@@ -160,8 +185,12 @@ func start(args []string) error {
 	cwd := f.String("cwd", "", "Git worktree or project directory")
 	name := f.String("name", "", "Short job label")
 	write := f.Bool("write", false, "Allow workspace-write sandbox")
+	agent := f.String("agent", "codex", "Backend: codex or claude")
+	role := f.String("role", "coder", "Role: coder or epm")
+	profileName := f.String("profile", "", "Named job profile")
 	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
 	spawnedBy := f.String("spawned-by", "", "Agent ID from snapshot; default: detect invoking agent")
+	parentJob := f.String("parent-job", "", "Requesting bridge job ID")
 	var contextPaths contextFlags
 	f.Var(&contextPaths, "context", "Context file or directory relative to AGENT_BRIDGE_CONTEXT_DIR (repeatable, comma-separated)")
 	contextWork := f.Bool("context-work", false, "Allow work-sensitive context selected by --context")
@@ -170,6 +199,29 @@ func start(args []string) error {
 	}
 	if *cwd == "" {
 		return errors.New("--cwd is required")
+	}
+	if err := validAgentRole(*agent, *role); err != nil {
+		return err
+	}
+	if *profileName == "" {
+		*profileName = defaultProfile(*agent, *role)
+	}
+	profiles, err := loadProfiles()
+	if err != nil {
+		return err
+	}
+	profile, ok := profiles[*profileName]
+	if !ok {
+		return fmt.Errorf("unknown profile %q", *profileName)
+	}
+	if profile.Agent != *agent {
+		return errors.New("profile agent does not match --agent")
+	}
+	if *role == "epm" && *profileName != "claude-epm" && *profileName != "claude-deep" {
+		return errors.New("EPM needs an EPM-capable profile")
+	}
+	if *role == "coder" && *profileName == "claude-epm" {
+		return errors.New("claude-epm is for EPM jobs")
 	}
 	if f.NArg() != 0 {
 		return errors.New("pass prompt on stdin or with --prompt-file")
@@ -201,9 +253,18 @@ func start(args []string) error {
 	if err != nil {
 		return err
 	}
-	spawner, err := resolveSpawner(*spawnedBy)
-	if err != nil {
-		return err
+	var spawner *Spawner
+	if *parentJob != "" {
+		parent, e := readJob(*parentJob)
+		if e != nil || parent.Status != "running" || parent.Agent != "claude" || parent.Role != "epm" || !alive(parent.WorkerPID, parent.WorkerStart) {
+			return errors.New("parent job is not a running Claude EPM")
+		}
+		spawner = &Spawner{AgentID: parent.ID, Provider: parent.Agent, SessionID: parent.SessionID}
+	} else {
+		spawner, err = resolveSpawner(*spawnedBy)
+		if err != nil {
+			return err
+		}
 	}
 	r, err := root()
 	if err != nil {
@@ -236,7 +297,17 @@ func start(args []string) error {
 	if os.Getenv("AGENT_BRIDGE_LAUNCH_MODE") == "direct" {
 		launcher = "direct"
 	}
-	j := Job{ID: id, Name: *name, SpawnedBy: spawner, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt"), ContextFiles: contextFiles}
+	depth := 0
+	if spawner != nil {
+		depth = 1
+	}
+	if *parentJob != "" {
+		parent, _ := readJob(*parentJob)
+		depth = parent.Depth + 1
+	} else if parent := ancestorJob(os.Getppid()); parent != nil {
+		depth = parent.Depth + 1
+	}
+	j := Job{ID: id, Name: *name, Agent: *agent, Role: *role, Profile: profile.Name, Model: profile.Model, Effort: profile.Effort, TimeLimit: profile.TimeLimit.String(), Depth: depth, SpawnedBy: spawner, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt"), ContextFiles: contextFiles}
 	if err := writeJob(j); err != nil {
 		return err
 	}
@@ -245,15 +316,19 @@ func start(args []string) error {
 		return err
 	}
 	if os.Getenv("AGENT_BRIDGE_LAUNCH_MODE") != "direct" {
-		codexBin := os.Getenv("AGENT_BRIDGE_CODEX_BIN")
-		if codexBin == "" {
-			codexBin = "codex"
+		binEnv, defaultBin := "AGENT_BRIDGE_CODEX_BIN", "codex"
+		if *agent == "claude" {
+			binEnv, defaultBin = "AGENT_BRIDGE_CLAUDE_BIN", "claude"
 		}
-		if codexBin, err = exec.LookPath(codexBin); err != nil {
+		bin := os.Getenv(binEnv)
+		if bin == "" {
+			bin = defaultBin
+		}
+		if bin, err = exec.LookPath(bin); err != nil {
 			return err
 		}
 		cmd := exec.Command("systemd-run", "--user", "--quiet", "--collect", "--service-type=exec", "--unit=agent-bridge-"+id,
-			"--setenv=AGENT_BRIDGE_STATE_DIR="+r, "--setenv=AGENT_BRIDGE_CODEX_BIN="+codexBin, self, "_worker", id)
+			"--setenv=AGENT_BRIDGE_STATE_DIR="+r, "--setenv="+binEnv+"="+bin, self, "_worker", id)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			j.Status, j.Error = "failed", strings.TrimSpace(string(out))
 			_ = writeJob(j)
@@ -305,11 +380,35 @@ func worker(id string) error {
 		return finishError(&j, err)
 	}
 	defer stderr.Close()
-	bin := os.Getenv("AGENT_BRIDGE_CODEX_BIN")
-	if bin == "" {
-		bin = "codex"
+	var cmd *exec.Cmd
+	if j.Agent == "claude" {
+		bin := os.Getenv("AGENT_BRIDGE_CLAUDE_BIN")
+		if bin == "" {
+			bin = "claude"
+		}
+		tools := "Read,Grep,Glob"
+		availableTools := tools
+		if j.Sandbox == "workspace-write" {
+			tools = "Read,Grep,Glob,Edit,Write,Bash(go test *),Bash(go vet *),Bash(make ci),Bash(gofmt *),Bash(git status *),Bash(git diff *),Bash(git log *),Bash(git add *)"
+			availableTools = "Read,Grep,Glob,Edit,Write,Bash"
+		}
+		args := []string{"-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--tools=" + availableTools, "--allowed-tools=" + tools}
+		if j.Model != "" {
+			args = append(args, "--model", j.Model, "--effort", j.Effort)
+		}
+		cmd = exec.Command(bin, args...)
+		cmd.Dir = j.Cwd
+	} else {
+		bin := os.Getenv("AGENT_BRIDGE_CODEX_BIN")
+		if bin == "" {
+			bin = "codex"
+		}
+		args := []string{"exec", "--json", "--sandbox", j.Sandbox, "--cd", j.Cwd, "--output-last-message", j.ResultPath}
+		if j.Model != "" {
+			args = append(args, "-m", j.Model, "-c", "model_reasoning_effort="+j.Effort)
+		}
+		cmd = exec.Command(bin, append(args, "-")...)
 	}
-	cmd := exec.Command(bin, "exec", "--json", "--sandbox", j.Sandbox, "--cd", j.Cwd, "--output-last-message", j.ResultPath, "-")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, events, stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -322,7 +421,31 @@ func worker(id string) error {
 		syscall.Kill(-j.CodexPID, syscall.SIGTERM)
 		return err
 	}
-	err = cmd.Wait()
+	limit, _ := time.ParseDuration(j.TimeLimit)
+	var timedOut bool
+	if limit > 0 {
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case err = <-done:
+		case <-time.After(limit):
+			timedOut = true
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			select {
+			case err = <-done:
+			case <-time.After(3 * time.Second):
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				err = <-done
+			}
+		}
+	} else {
+		err = cmd.Wait()
+	}
+	if j.Agent == "claude" {
+		if e := extractClaudeResult(j.EventsPath, j.ResultPath); e != nil && err == nil {
+			err = e
+		}
+	}
 	code := 0
 	if err != nil {
 		var e *exec.ExitError
@@ -333,7 +456,10 @@ func worker(id string) error {
 		}
 	}
 	j.ExitCode = &code
-	if _, err := os.Stat(filepath.Join(dir, "stop")); err == nil {
+	if timedOut {
+		j.Status = "halted"
+		j.Halt = &Halt{Kind: "time_limit", Code: "time_limit", Source: "launcher", DetectedAt: time.Now().UTC()}
+	} else if _, err := os.Stat(filepath.Join(dir, "stop")); err == nil {
 		j.Status = "stopped"
 	} else if j.Halt = detectJobHalt(j.EventsPath, j.StderrPath, time.Now().UTC(), code); j.Halt != nil {
 		j.Status = "halted"
@@ -421,14 +547,16 @@ func current(j Job) Job {
 	}
 	_ = scanJSONLines(j.EventsPath, func(line []byte) {
 		var event struct {
-			Type     string `json:"type"`
-			ThreadID string `json:"thread_id"`
-			Usage    struct {
-				Input      int64 `json:"input_tokens"`
-				Cached     int64 `json:"cached_input_tokens"`
-				CacheWrite int64 `json:"cache_write_input_tokens"`
-				Output     int64 `json:"output_tokens"`
-				Reasoning  int64 `json:"reasoning_output_tokens"`
+			Type      string `json:"type"`
+			ThreadID  string `json:"thread_id"`
+			SessionID string `json:"session_id"`
+			Usage     struct {
+				Input           int64 `json:"input_tokens"`
+				Cached          int64 `json:"cached_input_tokens"`
+				CacheReadClaude int64 `json:"cache_read_input_tokens"`
+				CacheWrite      int64 `json:"cache_write_input_tokens"`
+				Output          int64 `json:"output_tokens"`
+				Reasoning       int64 `json:"reasoning_output_tokens"`
 			} `json:"usage"`
 		}
 		if json.Unmarshal(line, &event) != nil {
@@ -436,6 +564,11 @@ func current(j Job) Job {
 		}
 		if event.Type == "thread.started" {
 			j.SessionID = event.ThreadID
+			return
+		}
+		if event.Type == "result" && j.Agent == "claude" {
+			j.SessionID = event.SessionID
+			j.Usage = &TokenUsage{Input: event.Usage.Input, CacheRead: event.Usage.CacheReadClaude, CacheWrite: event.Usage.CacheWrite, Output: event.Usage.Output}
 			return
 		}
 		if event.Type != "turn.completed" {

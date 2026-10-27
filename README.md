@@ -32,9 +32,11 @@ The coordinator rejects messages that do not parse or exceed 50 words.
 ## Commands
 
 ```bash
-agent-bridge start --cwd DIR --name NAME --prompt-file task.yaml [--write] [--spawned-by AGENT_ID] [--context PATH[,PATH...]] [--context-work]
+agent-bridge start --cwd DIR --name NAME --prompt-file task.yaml [--agent codex|claude] [--role coder|epm] [--profile NAME] [--write] [--spawned-by AGENT_ID] [--context PATH[,PATH...]] [--context-work]
 agent-bridge ask [--provider grok|ollama] --model MODEL [--prompt-file F] [--name NAME]
 agent-bridge ask --provider ollama --list-models
+agent-bridge request --file launch.yaml | request-status REQUEST_ID
+agent-bridge launcher [--once] | approvals | approve [--profile NAME] REQUEST_ID | deny REQUEST_ID
 agent-bridge list | show JOB_ID | wait JOB_ID... | stop JOB_ID | ack JOB_ID
 agent-bridge snapshot | latest | watch
 agent-bridge speak --text 'Agent bridge is ready.'
@@ -42,7 +44,9 @@ agent-bridge voice --agent claude [--access read|work] --source PULSE_SOURCE --w
 agent-bridge voice-log [--follow] [--lines 50] [--json]
 ```
 
-- `start` launches a Codex job in a user systemd unit. Read-only by default; `--write` allows edits in that worktree only.
+- `start` launches a Codex or Claude job in a user systemd unit. The default is `--agent codex --role coder`; Codex cannot use `epm`. Read-only is the default. Claude read-only jobs allow Read, Grep, and Glob. Claude write jobs also allow Edit, Write, and the limited Go, Make, formatting, and Git build/review commands described in [the launcher design](docs/LAUNCHER.md). L1 has no per-tool approval prompt. Jobs expose `agent`, `role`, and `depth` in JSON and the live view.
+- `request` queues a `launch: v1` YAML file in a private spool and prints its ID. `request-status` returns queued, pending, approved (with job ID), rejected, denied, or failed. The default spool is `/tmp/agent-bridge-$UID/spool`; override with `AGENT_BRIDGE_SPOOL_DIR`. The `launcher` user service applies hard rules, asks Ollama for a launch verdict, and creates the worktree before starting the job. `approvals` lists escalations; `approve` and `deny` resolve one. The default model is `qwen3-coder:30b` (`AGENT_BRIDGE_LAUNCHER_MODEL`). Install the optional unit from `packaging/agent-bridge-launcher.service` when ready.
+- Named profiles select model, effort, and wall clock limit. `packaging/profiles.yaml` is the default; `~/.config/agent-bridge/profiles.yaml` overrides it (`AGENT_BRIDGE_PROFILES` for tests). See [job profiles](docs/LAUNCHER-PROFILES.md). The viewer includes local Ollama completions and loaded models.
 - `--context` passes selected files from the context root to a `start` job under the sharing policy; repeat it or separate paths with commas. Work-sensitive files require `--context-work`.
 - `ask` sends one prompt to Grok (xAI API key required) or a local Ollama model and prints the reply. It cannot run tools.
 - `wait` blocks until jobs finish. Coordinators wait on every job they start.
