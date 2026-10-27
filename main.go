@@ -72,7 +72,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|request|request-status|launcher|local-model|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
+		return errors.New("usage: agent-bridge start|request|request-status|launcher|local-model|local-queue|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
 	}
 	switch args[0] {
 	case "start":
@@ -85,6 +85,8 @@ func run(args []string) error {
 		return launcherCommand(args[1:])
 	case "local-model":
 		return localModelCommand(args[1:])
+	case "local-queue":
+		return localQueueCommand(args[1:])
 	case "approvals":
 		return approvalsCommand(args[1:])
 	case "approve", "deny":
