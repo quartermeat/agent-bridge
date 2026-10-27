@@ -14,6 +14,9 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 	if s.Steinberger != nil && s.Steinberger.Health != "healthy" {
 		fmt.Fprintf(&b, "*** STEINBERGER UNHEALTHY: %s ***\n", s.Steinberger.Reason)
 	}
+	for _, line := range limitLines(s) {
+		fmt.Fprintln(&b, line)
+	}
 	for _, a := range s.Agents {
 		if a.Halt != nil {
 			fmt.Fprintf(&b, "*** %s HALTED: %s (%s) ***\n", a.Name, haltLabel(a.Halt), a.Halt.Code)

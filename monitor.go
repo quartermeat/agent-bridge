@@ -18,16 +18,17 @@ import (
 
 // Snapshot combines bridge activity with machine-local GPU and model usage.
 type Snapshot struct {
-	Version       int                `json:"version"`
-	SampledAt     time.Time          `json:"sampled_at"`
-	Agents        []AgentUsage       `json:"agents"`
-	Jobs          []Job              `json:"jobs"`
-	Sources       []SourceStatus     `json:"sources"`
-	GPUs          []GPU              `json:"gpus"`
-	GPUProcesses  []GPUProcess       `json:"gpu_processes"`
-	LocalModels   []LocalModel       `json:"local_models"`
-	Steinberger   *SteinbergerStatus `json:"steinberger,omitempty"`
-	RepoAttention *RepoAttentionFeed `json:"repo_attention,omitempty"`
+	Version        int                `json:"version"`
+	SampledAt      time.Time          `json:"sampled_at"`
+	Agents         []AgentUsage       `json:"agents"`
+	Jobs           []Job              `json:"jobs"`
+	Sources        []SourceStatus     `json:"sources"`
+	GPUs           []GPU              `json:"gpus"`
+	GPUProcesses   []GPUProcess       `json:"gpu_processes"`
+	LocalModels    []LocalModel       `json:"local_models"`
+	ProviderLimits []ProviderLimit    `json:"provider_limits"`
+	Steinberger    *SteinbergerStatus `json:"steinberger,omitempty"`
+	RepoAttention  *RepoAttentionFeed `json:"repo_attention,omitempty"`
 }
 
 type SourceStatus struct {
@@ -111,7 +112,14 @@ func collectSnapshot() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	now := time.Now().UTC()
-	s := Snapshot{Version: 1, SampledAt: now, Agents: []AgentUsage{}, Jobs: []Job{}, Sources: []SourceStatus{}, GPUs: []GPU{}, GPUProcesses: []GPUProcess{}, LocalModels: []LocalModel{}}
+	s := Snapshot{Version: 1, SampledAt: now, Agents: []AgentUsage{}, Jobs: []Job{}, Sources: []SourceStatus{}, GPUs: []GPU{}, GPUProcesses: []GPUProcess{}, LocalModels: []LocalModel{}, ProviderLimits: []ProviderLimit{}}
+	// Claude exposes no stable local rate-limit data, so only Codex is listed.
+	if limits := readCodexLimits(home, limitsNow()); limits != nil {
+		s.ProviderLimits = limits
+		s.Sources = append(s.Sources, SourceStatus{Name: "codex-limits", Available: true})
+	} else {
+		s.Sources = append(s.Sources, SourceStatus{Name: "codex-limits", Detail: "no rate_limits event in recent Codex sessions"})
+	}
 	dir := activityDir(home)
 	entries, err := os.ReadDir(dir)
 	if err != nil {

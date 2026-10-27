@@ -21,6 +21,8 @@ func TestMain(m *testing.M) {
 	ollamaHTTPClient = &http.Client{Transport: failingTransport{}}
 	// Closed port for any child process (built binaries) that reads OLLAMA_HOST.
 	os.Setenv("OLLAMA_HOST", "127.0.0.1:1")
+	// Never read the host's real Codex sessions for rate limits.
+	os.Setenv("CODEX_HOME", "/nonexistent/agent-bridge-test-codex")
 	os.Exit(m.Run())
 }
 

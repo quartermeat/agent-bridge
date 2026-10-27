@@ -46,13 +46,14 @@ type launchRecord struct {
 	CreatedAt time.Time     `json:"created_at"`
 }
 type launchResult struct {
-	ID        string    `json:"id"`
-	Status    string    `json:"status"`
-	JobID     string    `json:"job_id,omitempty"`
-	Rule      string    `json:"rule,omitempty"`
-	Rationale string    `json:"rationale,omitempty"`
-	SpawnedBy *Spawner  `json:"spawned_by,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        string     `json:"id"`
+	Status    string     `json:"status"`
+	JobID     string     `json:"job_id,omitempty"`
+	Rule      string     `json:"rule,omitempty"`
+	Rationale string     `json:"rationale,omitempty"`
+	SpawnedBy *Spawner   `json:"spawned_by,omitempty"`
+	RetryAt   *time.Time `json:"retry_at,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 type modelVerdict struct {
 	Verdict      string `json:"verdict"`
@@ -121,6 +122,9 @@ func providerExhausted(provider string, s Snapshot) bool {
 		if j.Agent == provider && j.Halt != nil && j.Halt.Kind == "usage_limit" && time.Since(j.UpdatedAt) < time.Hour {
 			exhausted = true
 		}
+	}
+	if _, _, ok := limitDeferral(provider, s); ok {
+		exhausted = true
 	}
 	return exhausted
 }
@@ -506,6 +510,9 @@ func launcherStateDir() (string, error) {
 	return p, nil
 }
 func appendDecision(id, rule, promptHash string, v modelVerdict, outcome string) error {
+	return appendDecisionRetry(id, rule, promptHash, v, outcome, nil)
+}
+func appendDecisionRetry(id, rule, promptHash string, v modelVerdict, outcome string, retryAt *time.Time) error {
 	dir, err := launcherStateDir()
 	if err != nil {
 		return err
@@ -518,7 +525,11 @@ func appendDecision(id, rule, promptHash string, v modelVerdict, outcome string)
 	defer f.Close()
 	profiles, _ := loadProfiles()
 	selected := profiles[v.Profile]
-	return json.NewEncoder(f).Encode(map[string]any{"ts": time.Now().UTC(), "id": id, "rule": rule, "model_prompt_hash": promptHash, "model_verdict": v.Verdict, "agent": v.Agent, "role": v.Role, "profile": v.Profile, "model": selected.Model, "effort": selected.Effort, "time_limit": selected.TimeLimit.String(), "substitution": v.Substitution, "local_agent_id": v.LocalID, "rationale": v.Rationale, "fallback_for": v.FallbackFor, "outcome": outcome})
+	row := map[string]any{"ts": time.Now().UTC(), "id": id, "rule": rule, "model_prompt_hash": promptHash, "model_verdict": v.Verdict, "agent": v.Agent, "role": v.Role, "profile": v.Profile, "model": selected.Model, "effort": selected.Effort, "time_limit": selected.TimeLimit.String(), "substitution": v.Substitution, "local_agent_id": v.LocalID, "rationale": v.Rationale, "fallback_for": v.FallbackFor, "outcome": outcome}
+	if retryAt != nil {
+		row["retry_at"] = retryAt
+	}
+	return json.NewEncoder(f).Encode(row)
 }
 func verdictSpawner(v modelVerdict) *Spawner {
 	if v.LocalID == "" {
@@ -808,6 +819,8 @@ func dispatchLaunch(r launchRecord, v modelVerdict) (string, error) {
 func processLaunch(dir string, r launchRecord, forced bool) error {
 	if result, err := readResult(dir, r.ID); err == nil && result.Status != "queued" {
 		return nil
+	} else if err == nil && !forced && result.RetryAt != nil && limitsNow().Before(*result.RetryAt) {
+		return nil // deferred until the provider window resets
 	}
 	s, err := collectSnapshot()
 	if err != nil {
@@ -883,11 +896,18 @@ func processLaunch(dir string, r launchRecord, forced bool) error {
 		if providerExhausted(v.Agent, s) {
 			if v.Role == "coder" && r.Request.FallbackFor == "" {
 				v.Rationale = "Codex usage limit; queued for retry"
+				var retryAt *time.Time
+				if l, until, ok := limitDeferral(v.Agent, s); ok {
+					v.Rationale = fmt.Sprintf("Codex %s window at %.0f%% (defer at %.0f%%); queued until reset", l.Window, l.UsedPercent, deferPercent())
+					if !until.IsZero() {
+						retryAt = &until
+					}
+				}
 				if err := writeJSONPrivate(filepath.Join(dir, r.ID+".selected.json"), v); err != nil {
 					return err
 				}
-				_ = appendDecision(r.ID, "pass", hash, v, "queued_usage_limit")
-				return setResult(dir, launchResult{ID: r.ID, Status: "queued", Rationale: v.Rationale, SpawnedBy: verdictSpawner(v)})
+				_ = appendDecisionRetry(r.ID, "pass", hash, v, "queued_usage_limit", retryAt)
+				return setResult(dir, launchResult{ID: r.ID, Status: "queued", Rationale: v.Rationale, SpawnedBy: verdictSpawner(v), RetryAt: retryAt})
 			}
 			if !forced {
 				v.Verdict, v.Rationale = "escalate", "provider usage limit has no allowed substitute"

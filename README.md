@@ -97,6 +97,7 @@ The `agent-bridge-monitor` user service samples every two seconds to `~/.local/s
 
 - agents and jobs, with `activity_state` and token usage;
 - halts (`usage_limit`, `rate_limit`, `context_limit`) with scope;
+- `provider_limits`: Codex rate-limit windows read from the newest `~/.codex/sessions` rollout (`CODEX_HOME` honored), shown as one line in `watch`; coder launches wait as `queued_usage_limit` with `retry_at` at or above `AGENT_BRIDGE_DEFER_PERCENT` (default 90), never moving to Claude (Claude has no stable local rate data, so it is not listed);
 - GPU VRAM, top VRAM processes, and loaded Ollama models.
 - Steinberger timer health and recent commits from repo-attention's small feed.
 
