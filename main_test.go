@@ -86,3 +86,15 @@ func TestStartAndObserve(t *testing.T) {
 		t.Fatalf("missing event: %s", b)
 	}
 }
+
+func TestStartRejectsClaudeCoder(t *testing.T) {
+	if err := start([]string{"--cwd", t.TempDir(), "--agent", "claude", "--role", "coder"}); err == nil || !strings.Contains(err.Error(), "Claude cannot run the coder role") {
+		t.Fatalf("Claude coder start: %v", err)
+	}
+	if err := validAgentRole("claude", "epm"); err != nil {
+		t.Fatalf("Claude EPM: %v", err)
+	}
+	if err := validAgentRole("codex", "coder"); err != nil {
+		t.Fatalf("Codex coder: %v", err)
+	}
+}

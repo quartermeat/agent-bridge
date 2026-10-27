@@ -97,7 +97,7 @@ func launcherSlotAvailable(s Snapshot, profile string) bool {
 }
 
 func substituteProfile(profile string, s Snapshot) string {
-	profiles := map[string]string{"claude-quick": "codex-quick", "claude-std": "codex-std", "claude-deep": "codex-deep", "codex-std": "claude-quick", "codex-deep": "claude-std"}
+	profiles := map[string]string{"claude-quick": "codex-quick", "claude-std": "codex-std", "claude-deep": "codex-deep"}
 	provider := "codex"
 	if strings.HasPrefix(profile, "claude-") {
 		provider = "claude"
@@ -132,6 +132,9 @@ func validAgentRole(agent, role string) error {
 	}
 	if agent == "codex" && role == "epm" {
 		return errors.New("Codex cannot run the epm role")
+	}
+	if agent == "claude" && role == "coder" {
+		return errors.New("Claude cannot run the coder role")
 	}
 	return nil
 }
@@ -295,6 +298,11 @@ func parseLaunchYAML(data []byte) (launchRequest, error) {
 	}
 	if r.Launch != "v1" || (r.Role != "coder" && r.Role != "epm") || (r.Agent != "codex" && r.Agent != "claude" && r.Agent != "auto") || r.Repo == "" || r.Task == "" || r.PromptFile == "" || r.Reason == "" {
 		return r, errors.New("missing or invalid launch fields")
+	}
+	if r.Agent != "auto" {
+		if err := validAgentRole(r.Agent, r.Role); err != nil {
+			return r, err
+		}
 	}
 	if !taskName.MatchString(r.Task) {
 		return r, errors.New("task must be short kebab case")
@@ -509,6 +517,11 @@ func requesterDepth(w requester, s Snapshot) (int, error) {
 	return 0, errors.New("requester agent not live")
 }
 func checkLaunchRules(r launchRecord, s Snapshot) error {
+	if r.Request.Agent != "auto" {
+		if err := validAgentRole(r.Request.Agent, r.Request.Role); err != nil {
+			return err
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -554,6 +567,9 @@ func checkLaunchRules(r launchRecord, s Snapshot) error {
 		}
 		if r.Request.Agent != "auto" && p.Agent != r.Request.Agent {
 			return errors.New("requested profile agent mismatch")
+		}
+		if err := validAgentRole(p.Agent, r.Request.Role); err != nil {
+			return err
 		}
 		if r.Requester.JobID != "" && r.Request.Profile == "claude-deep" {
 			return errors.New("requested profile exceeds EPM ceiling")
@@ -603,6 +619,9 @@ func parseModelVerdict(body string, r launchRequest, fromJob bool) (modelVerdict
 	if v.Verdict == "approve" {
 		if err := validAgentRole(v.Agent, v.Role); err != nil {
 			return v, err
+		}
+		if r.Agent != "auto" && v.Agent != r.Agent {
+			return v, errors.New("model changed requested agent")
 		}
 		if v.Role != r.Role {
 			return v, errors.New("model changed requested role")
@@ -659,7 +678,7 @@ func modelLaunchVerdict(ctx context.Context, r launchRecord) (modelVerdict, stri
 	if err != nil {
 		return modelVerdict{}, "", err
 	}
-	prompt := fmt.Sprintf("Request: %s. From EPM: %t. Choose approve, escalate, or reject. On approve choose agent, requested role, and profile. Profile cost order: %s. Pick cheapest fitting profile within requested ceiling. Coordinator may only launch Claude EPM. EPM may launch Claude coder, Codex coder, or Claude EPM.", mustJSON(r.Request), r.Requester.JobID != "", strings.Join(profileOrder, " < "))
+	prompt := fmt.Sprintf("Request: %s. From EPM: %t. Choose approve, escalate, or reject. On approve choose agent, requested role, and profile. Profile cost order: %s. Pick cheapest fitting profile within requested ceiling. Coordinator may only launch Claude EPM. EPM may launch Codex coder or Claude EPM. Never choose Claude coder; agent:auto for coder means Codex.", mustJSON(r.Request), r.Requester.JobID != "", strings.Join(profileOrder, " < "))
 	h := sha256.Sum256([]byte(prompt))
 	hash := hex.EncodeToString(h[:])
 	body, _, _, _, err := ollamaCompletion(ctx, base, model, "Return only JSON with verdict, agent, role, profile, rationale. No markdown.", prompt)
@@ -774,7 +793,11 @@ func processLaunch(dir string, r launchRecord, forced bool) error {
 	if forced {
 		v = modelVerdict{Verdict: "approve", Agent: r.Request.Agent, Role: r.Request.Role, Profile: r.Request.Profile, Rationale: "user approved"}
 		if v.Agent == "auto" {
-			v.Agent = "claude"
+			if v.Role == "coder" {
+				v.Agent = "codex"
+			} else {
+				v.Agent = "claude"
+			}
 		}
 		if err := validAgentRole(v.Agent, v.Role); err != nil {
 			return err
@@ -799,12 +822,26 @@ func processLaunch(dir string, r launchRecord, forced bool) error {
 		_ = appendDecision(r.ID, "pass", hash, v, "pending")
 		return setResult(dir, launchResult{ID: r.ID, Status: "pending", Rationale: v.Rationale, SpawnedBy: verdictSpawner(v)})
 	case "approve":
-		if !forced && v.Substitution == "" {
+		if err := validAgentRole(v.Agent, v.Role); err != nil {
+			return setResult(dir, launchResult{ID: r.ID, Status: "rejected", Rule: err.Error()})
+		}
+		if !forced && v.Role == "coder" && v.Substitution == "" {
 			replacement := substituteProfile(v.Profile, s)
 			profiles, _ := loadProfiles()
 			if p, ok := profiles[replacement]; replacement != "" && ok {
 				v.Substitution, v.Profile, v.Agent = v.Profile, replacement, p.Agent
-			} else if providerExhausted(v.Agent, s) {
+			}
+		}
+		if providerExhausted(v.Agent, s) {
+			if v.Role == "coder" {
+				v.Rationale = "Codex usage limit; queued for retry"
+				if err := writeJSONPrivate(filepath.Join(dir, r.ID+".selected.json"), v); err != nil {
+					return err
+				}
+				_ = appendDecision(r.ID, "pass", hash, v, "queued_usage_limit")
+				return setResult(dir, launchResult{ID: r.ID, Status: "queued", Rationale: v.Rationale, SpawnedBy: verdictSpawner(v)})
+			}
+			if !forced {
 				v.Verdict, v.Rationale = "escalate", "provider usage limit has no allowed substitute"
 				p, err := pendingPath(r.ID)
 				if err != nil {
@@ -987,8 +1024,8 @@ func resolveApprovalCommand(action string, args []string) error {
 		if r.Request.Role == "epm" && profileOverride != "claude-epm" && profileOverride != "claude-deep" {
 			return errors.New("EPM needs an EPM-capable profile")
 		}
-		if r.Request.Role == "coder" && profileOverride == "claude-epm" {
-			return errors.New("claude-epm is for EPM jobs")
+		if err := validAgentRole(p.Agent, r.Request.Role); err != nil {
+			return err
 		}
 		r.Request.Profile, r.Request.Agent = profileOverride, p.Agent
 	}

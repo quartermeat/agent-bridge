@@ -70,6 +70,11 @@ func TestLaunchRules(t *testing.T) {
 		}},
 		{"coordinator coder", func(r *launchRecord, _ *Snapshot) { r.Request.Role = "coder" }},
 		{"codex epm", func(r *launchRecord, _ *Snapshot) { r.Request.Agent = "codex" }},
+		{"claude coder", func(r *launchRecord, _ *Snapshot) { r.Requester = requester{JobID: parentID}; r.Request.Role = "coder" }},
+		{"auto coder claude profile", func(r *launchRecord, _ *Snapshot) {
+			r.Requester = requester{JobID: parentID}
+			r.Request.Role, r.Request.Agent, r.Request.Profile = "coder", "auto", "claude-std"
+		}},
 		{"missing prompt", func(r *launchRecord, _ *Snapshot) { r.Request.PromptFile = filepath.Join(home, "missing") }},
 		{"bad context", func(r *launchRecord, _ *Snapshot) { r.Request.Context = []string{"../secret"} }},
 		{"bad task", func(r *launchRecord, _ *Snapshot) { r.Request.Task = "BAD" }},
@@ -158,6 +163,147 @@ func TestVerdictParsing(t *testing.T) {
 		t.Fatalf("verdict %+v hash %q err %v", v, hash, err)
 	}
 }
+
+func TestCoderVerdictRequiresCodex(t *testing.T) {
+	r := launchRequest{Role: "coder", Agent: "auto"}
+	for _, body := range []string{
+		`{"verdict":"approve","agent":"claude","role":"coder","profile":"claude-std","rationale":"fits"}`,
+		`{"verdict":"approve","agent":"claude","role":"coder","profile":"codex-std","rationale":"fits"}`,
+	} {
+		if _, err := parseModelVerdict(body, r, true); err == nil {
+			t.Fatalf("accepted Claude coder verdict %s", body)
+		}
+	}
+	if _, err := parseModelVerdict(`{"verdict":"approve","agent":"codex","role":"coder","rationale":"fits"}`, r, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCoderRequestRejectsClaude(t *testing.T) {
+	r, _, _ := launchFixture(t)
+	for _, agent := range []string{"claude", "auto"} {
+		profile := ""
+		if agent == "auto" {
+			profile = "\nprofile: claude-std"
+		}
+		body := []byte("launch: v1\nrole: coder\nagent: " + agent + profile + "\nrepo: " + r.Request.Repo + "\ntask: review\nprompt_file: " + r.Request.PromptFile + "\nreason: Review work\n")
+		parsed, err := parseLaunchYAML(body)
+		if agent == "claude" && err == nil {
+			t.Fatal("accepted Claude coder request")
+		}
+		if agent == "auto" {
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Request = parsed
+			r.Requester = requester{JobID: "parent"}
+			parentDir, _ := jobDir("parent")
+			if err := os.MkdirAll(parentDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJob(Job{ID: "parent", Agent: "claude", Role: "epm", Status: "running", WorkerPID: os.Getpid(), WorkerStart: processStart(os.Getpid())}); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkLaunchRules(r, Snapshot{}); err == nil {
+				t.Fatal("accepted auto coder with Claude profile")
+			}
+		}
+	}
+}
+
+func TestForcedCoderApprovalQueuesOnCodexUsageLimit(t *testing.T) {
+	r, _, home := launchFixture(t)
+	r.Request.Role, r.Request.Agent = "coder", "auto"
+	r.Requester = requester{JobID: "parent"}
+	parentDir, _ := jobDir("parent")
+	if err := os.MkdirAll(parentDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJob(Job{ID: "parent", Agent: "claude", Role: "epm", Status: "running", WorkerPID: os.Getpid(), WorkerStart: processStart(os.Getpid())}); err != nil {
+		t.Fatal(err)
+	}
+	haltDir, _ := jobDir("exhausted")
+	if err := os.MkdirAll(haltDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	exhausted := Job{ID: "exhausted", Agent: "codex", Role: "coder", Status: "halted", Halt: &Halt{Kind: "usage_limit"}, UpdatedAt: time.Now().UTC()}
+	if err := writeJob(exhausted); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := spoolDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := processLaunch(dir, r, true); err != nil {
+		t.Fatal(err)
+	}
+	result, err := readResult(dir, r.ID)
+	if err != nil || result.Status != "queued" || !strings.Contains(result.Rationale, "Codex usage limit") {
+		t.Fatalf("usage queue result %+v: %v", result, err)
+	}
+	var selected modelVerdict
+	b, err := os.ReadFile(filepath.Join(dir, r.ID+".selected.json"))
+	if err != nil || json.Unmarshal(b, &selected) != nil || selected.Agent != "codex" || selected.Role != "coder" {
+		t.Fatalf("queued verdict %+v: %v", selected, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "worktrees", "sample-review")); !os.IsNotExist(err) {
+		t.Fatalf("worktree created while exhausted: %v", err)
+	}
+	if got := substituteProfile("codex-std", Snapshot{Jobs: []Job{exhausted}}); got != "" {
+		t.Fatalf("Codex substituted to %q", got)
+	}
+	// A later dispatcher pass may retry the saved verdict when the usage halt clears.
+	exhausted.Halt = nil
+	if err := writeJob(exhausted); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_BRIDGE_LAUNCHER_MAX_JOBS", "1")
+	capacityDir, _ := jobDir("capacity")
+	if err := os.MkdirAll(capacityDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJob(Job{ID: "capacity", Agent: "codex", Role: "coder", Launcher: "launcher", Status: "running", WorkerPID: os.Getpid(), WorkerStart: processStart(os.Getpid())}); err != nil {
+		t.Fatal(err)
+	}
+	if err := processLaunch(dir, r, false); !errors.Is(err, errCapWait) {
+		t.Fatalf("retry after usage limit: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, r.ID+".selected.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestForcedApprovalRejectsClaudeCoderOverride(t *testing.T) {
+	r, _, _ := launchFixture(t)
+	r.Request.Role, r.Request.Agent = "coder", "auto"
+	r.Request.Profile = "claude-std"
+	r.Requester = requester{JobID: "parent"}
+	parentDir, _ := jobDir("parent")
+	if err := os.MkdirAll(parentDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJob(Job{ID: "parent", Agent: "claude", Role: "epm", Status: "running", WorkerPID: os.Getpid(), WorkerStart: processStart(os.Getpid())}); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := spoolDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := processLaunch(dir, r, true); err != nil {
+		t.Fatal(err)
+	}
+	result, err := readResult(dir, r.ID)
+	if err != nil || result.Status != "rejected" {
+		t.Fatalf("Claude coder override result %+v: %v", result, err)
+	}
+	r.Request.Profile = ""
+	if err := writeJSONPrivate(filepath.Join(dir, r.ID+".request.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolveApprovalCommand("approve", []string{"--profile", "claude-std", r.ID}); err == nil {
+		t.Fatal("accepted Claude coder approval profile")
+	}
+}
 func TestSpoolRoundTripAndEscalation(t *testing.T) {
 	r, _, _ := launchFixture(t)
 	dir, err := spoolDir()
@@ -234,7 +380,7 @@ func TestClaudeWorkerFake(t *testing.T) {
 	if err := os.MkdirAll(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	j := Job{ID: id, Agent: "claude", Role: "coder", Cwd: dir, Sandbox: "read-only", Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(path, "events.jsonl"), StderrPath: filepath.Join(path, "stderr.log"), ResultPath: filepath.Join(path, "result.txt")}
+	j := Job{ID: id, Agent: "claude", Role: "epm", Cwd: dir, Sandbox: "read-only", Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(path, "events.jsonl"), StderrPath: filepath.Join(path, "stderr.log"), ResultPath: filepath.Join(path, "result.txt")}
 	if err := writeJob(j); err != nil {
 		t.Fatal(err)
 	}

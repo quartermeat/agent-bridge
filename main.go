@@ -191,7 +191,7 @@ func start(args []string) error {
 	cwd := f.String("cwd", "", "Git worktree or project directory")
 	name := f.String("name", "", "Short job label")
 	write := f.Bool("write", false, "Allow workspace-write sandbox")
-	agent := f.String("agent", "codex", "Backend: codex or claude")
+	agent := f.String("agent", "codex", "Backend: codex for coder, claude for EPM")
 	role := f.String("role", "coder", "Role: coder or epm")
 	profileName := f.String("profile", "", "Named job profile")
 	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
