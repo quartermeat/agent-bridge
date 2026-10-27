@@ -161,7 +161,7 @@ func TestStartClaudeDefaultsToEPM(t *testing.T) {
 }
 
 func TestStartRejectsClaudeCoder(t *testing.T) {
-	if err := start([]string{"--cwd", t.TempDir(), "--agent", "claude", "--role", "coder"}); err == nil || !strings.Contains(err.Error(), "Claude cannot run the coder role") {
+	if err := start([]string{"--cwd", t.TempDir(), "--agent", "claude", "--role", "coder"}); err == nil || !strings.Contains(err.Error(), "Claude cannot run the coder role without --fallback-for") {
 		t.Fatalf("Claude coder start: %v", err)
 	}
 	if err := start([]string{"--cwd", t.TempDir(), "--agent", "codex", "--role", "epm"}); err == nil || !strings.Contains(err.Error(), "Codex cannot run the epm role") {
@@ -175,5 +175,100 @@ func TestStartRejectsClaudeCoder(t *testing.T) {
 	}
 	if err := validAgentRole("codex", "coder"); err != nil {
 		t.Fatalf("Codex coder: %v", err)
+	}
+}
+
+func writeFallbackJobs(t *testing.T, cwd string) {
+	t.Helper()
+	t.Setenv("AGENT_BRIDGE_STATE_DIR", t.TempDir())
+	halt := &Halt{Kind: "usage_limit", Code: "usage_limit_exceeded", Source: "test", DetectedAt: time.Now().UTC()}
+	for _, j := range []Job{
+		{ID: "halted", Agent: "codex", Role: "coder", Cwd: cwd, Status: "halted", Halt: halt, UpdatedAt: time.Now().UTC()},
+		{ID: "claudejob", Agent: "claude", Role: "epm", Cwd: cwd, Status: "halted", Halt: halt, UpdatedAt: time.Now().UTC()},
+		{ID: "running", Agent: "codex", Role: "coder", Cwd: cwd, Status: "running", UpdatedAt: time.Now().UTC()},
+		{ID: "timelimit", Agent: "codex", Role: "coder", Cwd: cwd, Status: "halted", Halt: &Halt{Kind: "time_limit", Code: "time_limit"}, UpdatedAt: time.Now().UTC()},
+	} {
+		dir, _ := jobDir(j.ID)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestStartFallbackRejections(t *testing.T) {
+	cwd := t.TempDir()
+	writeFallbackJobs(t, cwd)
+	snap := Snapshot{}
+	old := fallbackSnapshot
+	fallbackSnapshot = func() (Snapshot, error) { return snap, nil }
+	defer func() { fallbackSnapshot = old }()
+	for name, tc := range map[string]struct{ id, want string }{
+		"non-Codex job":  {"claudejob", "not a Codex coder"},
+		"non-halted job": {"running", "did not halt on a usage limit"},
+		"non-usage halt": {"timelimit", "did not halt on a usage limit"},
+		"missing job":    {"nosuch", "fallback job"},
+	} {
+		err := start([]string{"--cwd", cwd, "--agent", "claude", "--role", "coder", "--fallback-for", tc.id})
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if err := start([]string{"--cwd", cwd, "--agent", "codex", "--fallback-for", "halted"}); err == nil || !strings.Contains(err.Error(), "only for --agent claude --role coder") {
+		t.Errorf("codex with --fallback-for: %v", err)
+	}
+	snap = Snapshot{Agents: []AgentUsage{{Provider: "claude", ActivityState: "halted_usage"}}}
+	if err := start([]string{"--cwd", cwd, "--agent", "claude", "--role", "coder", "--fallback-for", "halted"}); err == nil || !strings.Contains(err.Error(), "Claude usage limit") {
+		t.Errorf("Claude exhausted: %v", err)
+	}
+}
+
+func TestStartFallbackAccepted(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "agent-bridge")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	fake := filepath.Join(tmp, "fake-claude")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\ncat >/dev/null\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(tmp, "state")
+	worktree := filepath.Join(tmp, "wt")
+	if err := os.Mkdir(worktree, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_BRIDGE_STATE_DIR", state)
+	halt := &Halt{Kind: "usage_limit", Code: "usage_limit_exceeded", Source: "test", DetectedAt: time.Now().UTC()}
+	dir, _ := jobDir("halted")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJob(Job{ID: "halted", Agent: "codex", Role: "coder", Cwd: worktree, Status: "halted", Halt: halt, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	activity := filepath.Join(tmp, "activity")
+	if err := os.Mkdir(activity, 0700); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := json.Marshal(map[string]any{"id": "claude-epm-1", "name": "Claude", "phase": "waiting", "sampledAt": time.Now().UTC()})
+	if err := os.WriteFile(filepath.Join(activity, "claude-epm-1.json"), rec, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "start", "--name", "fb", "--agent", "claude", "--role", "coder", "--fallback-for", "halted", "--spawned-by", "claude-epm-1")
+	cmd.Env = append(os.Environ(), "AGENT_BRIDGE_STATE_DIR="+state, "AGENT_BRIDGE_ACTIVITY_DIR="+activity, "AGENT_BRIDGE_CLAUDE_BIN="+fake, "AGENT_BRIDGE_LAUNCH_MODE=direct")
+	cmd.Stdin = strings.NewReader("Do the task.")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v: %s", err, out)
+	}
+	j, err := readJob(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Agent != "claude" || j.Role != "coder" || j.FallbackFor != "halted" || j.Profile != "claude-std" || j.Cwd != worktree {
+		t.Fatalf("fallback job = %+v", j)
 	}
 }

@@ -24,15 +24,16 @@ import (
 )
 
 type launchRequest struct {
-	Launch     string   `json:"launch"`
-	Role       string   `json:"role"`
-	Agent      string   `json:"agent"`
-	Profile    string   `json:"profile,omitempty"`
-	Repo       string   `json:"repo"`
-	Task       string   `json:"task"`
-	PromptFile string   `json:"prompt_file"`
-	Context    []string `json:"context,omitempty"`
-	Reason     string   `json:"reason"`
+	Launch      string   `json:"launch"`
+	Role        string   `json:"role"`
+	Agent       string   `json:"agent"`
+	Profile     string   `json:"profile,omitempty"`
+	Repo        string   `json:"repo"`
+	Task        string   `json:"task"`
+	PromptFile  string   `json:"prompt_file"`
+	Context     []string `json:"context,omitempty"`
+	Reason      string   `json:"reason"`
+	FallbackFor string   `json:"fallback_for,omitempty"`
 }
 type requester struct {
 	AgentID string `json:"agent_id,omitempty"`
@@ -61,6 +62,7 @@ type modelVerdict struct {
 	Substitution string `json:"substitution,omitempty"`
 	LocalID      string `json:"local_agent_id,omitempty"`
 	Rationale    string `json:"rationale"`
+	FallbackFor  string `json:"-"` // set by the launcher from the request, never by the model
 }
 
 var taskName = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -123,7 +125,31 @@ func providerExhausted(provider string, s Snapshot) bool {
 	return exhausted
 }
 
-func validAgentRole(agent, role string) error {
+func validAgentRole(agent, role string) error { return validAgentRoleFB(agent, role, "") }
+
+// fallbackSnapshot is replaced in tests.
+var fallbackSnapshot = collectSnapshot
+
+// checkFallback accepts a Claude coder only as the fallback for a Codex coder
+// that halted on a usage limit while Claude has capacity.
+func checkFallback(id string, s Snapshot) error {
+	j, err := readJob(id)
+	if err != nil {
+		return fmt.Errorf("fallback job %q: %w", id, err)
+	}
+	if j.Agent != "codex" || j.Role != "coder" {
+		return fmt.Errorf("fallback job %s is not a Codex coder", id)
+	}
+	if j.Halt == nil || j.Halt.Kind != "usage_limit" {
+		return fmt.Errorf("fallback job %s did not halt on a usage limit", id)
+	}
+	if providerExhausted("claude", s) {
+		return errors.New("Claude usage limit; no fallback capacity")
+	}
+	return nil
+}
+
+func validAgentRoleFB(agent, role, fallback string) error {
 	if agent != "codex" && agent != "claude" {
 		return fmt.Errorf("invalid agent %q", agent)
 	}
@@ -133,8 +159,8 @@ func validAgentRole(agent, role string) error {
 	if agent == "codex" && role == "epm" {
 		return errors.New("Codex cannot run the epm role")
 	}
-	if agent == "claude" && role == "coder" {
-		return errors.New("Claude cannot run the coder role")
+	if agent == "claude" && role == "coder" && fallback == "" {
+		return errors.New("Claude cannot run the coder role without --fallback-for a usage-halted Codex coder")
 	}
 	return nil
 }
@@ -292,6 +318,8 @@ func parseLaunchYAML(data []byte) (launchRequest, error) {
 			r.PromptFile = value
 		case "reason":
 			r.Reason = value
+		case "fallback_for":
+			r.FallbackFor = value
 		default:
 			return r, fmt.Errorf("unknown key %q", key)
 		}
@@ -299,8 +327,11 @@ func parseLaunchYAML(data []byte) (launchRequest, error) {
 	if r.Launch != "v1" || (r.Role != "coder" && r.Role != "epm") || (r.Agent != "codex" && r.Agent != "claude" && r.Agent != "auto") || r.Repo == "" || r.Task == "" || r.PromptFile == "" || r.Reason == "" {
 		return r, errors.New("missing or invalid launch fields")
 	}
+	if r.FallbackFor != "" && (r.Role != "coder" || r.Agent == "codex") {
+		return r, errors.New("fallback_for is only for a Claude coder request")
+	}
 	if r.Agent != "auto" {
-		if err := validAgentRole(r.Agent, r.Role); err != nil {
+		if err := validAgentRoleFB(r.Agent, r.Role, r.FallbackFor); err != nil {
 			return r, err
 		}
 	}
@@ -487,7 +518,7 @@ func appendDecision(id, rule, promptHash string, v modelVerdict, outcome string)
 	defer f.Close()
 	profiles, _ := loadProfiles()
 	selected := profiles[v.Profile]
-	return json.NewEncoder(f).Encode(map[string]any{"ts": time.Now().UTC(), "id": id, "rule": rule, "model_prompt_hash": promptHash, "model_verdict": v.Verdict, "agent": v.Agent, "role": v.Role, "profile": v.Profile, "model": selected.Model, "effort": selected.Effort, "time_limit": selected.TimeLimit.String(), "substitution": v.Substitution, "local_agent_id": v.LocalID, "rationale": v.Rationale, "outcome": outcome})
+	return json.NewEncoder(f).Encode(map[string]any{"ts": time.Now().UTC(), "id": id, "rule": rule, "model_prompt_hash": promptHash, "model_verdict": v.Verdict, "agent": v.Agent, "role": v.Role, "profile": v.Profile, "model": selected.Model, "effort": selected.Effort, "time_limit": selected.TimeLimit.String(), "substitution": v.Substitution, "local_agent_id": v.LocalID, "rationale": v.Rationale, "fallback_for": v.FallbackFor, "outcome": outcome})
 }
 func verdictSpawner(v modelVerdict) *Spawner {
 	if v.LocalID == "" {
@@ -518,7 +549,15 @@ func requesterDepth(w requester, s Snapshot) (int, error) {
 }
 func checkLaunchRules(r launchRecord, s Snapshot) error {
 	if r.Request.Agent != "auto" {
-		if err := validAgentRole(r.Request.Agent, r.Request.Role); err != nil {
+		if err := validAgentRoleFB(r.Request.Agent, r.Request.Role, r.Request.FallbackFor); err != nil {
+			return err
+		}
+	}
+	if r.Request.FallbackFor != "" {
+		if r.Requester.JobID == "" {
+			return errors.New("fallback_for needs a running Claude EPM requester")
+		}
+		if err := checkFallback(r.Request.FallbackFor, s); err != nil {
 			return err
 		}
 	}
@@ -568,7 +607,7 @@ func checkLaunchRules(r launchRecord, s Snapshot) error {
 		if r.Request.Agent != "auto" && p.Agent != r.Request.Agent {
 			return errors.New("requested profile agent mismatch")
 		}
-		if err := validAgentRole(p.Agent, r.Request.Role); err != nil {
+		if err := validAgentRoleFB(p.Agent, r.Request.Role, r.Request.FallbackFor); err != nil {
 			return err
 		}
 		if r.Requester.JobID != "" && r.Request.Profile == "claude-deep" {
@@ -617,8 +656,11 @@ func parseModelVerdict(body string, r launchRequest, fromJob bool) (modelVerdict
 		return v, errors.New("model supplied reserved verdict fields")
 	}
 	if v.Verdict == "approve" {
-		if err := validAgentRole(v.Agent, v.Role); err != nil {
+		if err := validAgentRoleFB(v.Agent, v.Role, r.FallbackFor); err != nil {
 			return v, err
+		}
+		if r.FallbackFor != "" && v.Agent != "claude" {
+			return v, errors.New("model changed fallback agent")
 		}
 		if r.Agent != "auto" && v.Agent != r.Agent {
 			return v, errors.New("model changed requested agent")
@@ -730,6 +772,9 @@ func dispatchLaunch(r launchRecord, v modelVerdict) (string, error) {
 	for _, p := range r.Request.Context {
 		args = append(args, "--context", p)
 	}
+	if r.Request.FallbackFor != "" {
+		args = append(args, "--fallback-for", r.Request.FallbackFor)
+	}
 	if r.Requester.JobID != "" {
 		args = append(args, "--parent-job", r.Requester.JobID)
 	}
@@ -770,7 +815,7 @@ func processLaunch(dir string, r launchRecord, forced bool) error {
 	}
 	if err := checkLaunchRules(r, s); err != nil {
 		res := launchResult{ID: r.ID, Status: "rejected", Rule: err.Error()}
-		_ = appendDecision(r.ID, err.Error(), "", modelVerdict{}, "rejected")
+		_ = appendDecision(r.ID, err.Error(), "", modelVerdict{FallbackFor: r.Request.FallbackFor}, "rejected")
 		return setResult(dir, res)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -793,19 +838,22 @@ func processLaunch(dir string, r launchRecord, forced bool) error {
 	if forced {
 		v = modelVerdict{Verdict: "approve", Agent: r.Request.Agent, Role: r.Request.Role, Profile: r.Request.Profile, Rationale: "user approved"}
 		if v.Agent == "auto" {
-			if v.Role == "coder" {
+			if v.Role == "coder" && r.Request.FallbackFor == "" {
 				v.Agent = "codex"
+			} else if v.Role == "coder" {
+				v.Agent = "claude"
 			} else {
 				v.Agent = "claude"
 			}
 		}
-		if err := validAgentRole(v.Agent, v.Role); err != nil {
+		if err := validAgentRoleFB(v.Agent, v.Role, r.Request.FallbackFor); err != nil {
 			return err
 		}
 		if v.Profile == "" {
 			v.Profile = defaultProfile(v.Agent, v.Role)
 		}
 	}
+	v.FallbackFor = r.Request.FallbackFor
 	switch v.Verdict {
 	case "reject":
 		_ = appendDecision(r.ID, "pass", hash, v, "rejected")
@@ -822,10 +870,10 @@ func processLaunch(dir string, r launchRecord, forced bool) error {
 		_ = appendDecision(r.ID, "pass", hash, v, "pending")
 		return setResult(dir, launchResult{ID: r.ID, Status: "pending", Rationale: v.Rationale, SpawnedBy: verdictSpawner(v)})
 	case "approve":
-		if err := validAgentRole(v.Agent, v.Role); err != nil {
+		if err := validAgentRoleFB(v.Agent, v.Role, r.Request.FallbackFor); err != nil {
 			return setResult(dir, launchResult{ID: r.ID, Status: "rejected", Rule: err.Error()})
 		}
-		if !forced && v.Role == "coder" && v.Substitution == "" {
+		if !forced && v.Role == "coder" && v.Substitution == "" && r.Request.FallbackFor == "" {
 			replacement := substituteProfile(v.Profile, s)
 			profiles, _ := loadProfiles()
 			if p, ok := profiles[replacement]; replacement != "" && ok {
@@ -833,7 +881,7 @@ func processLaunch(dir string, r launchRecord, forced bool) error {
 			}
 		}
 		if providerExhausted(v.Agent, s) {
-			if v.Role == "coder" {
+			if v.Role == "coder" && r.Request.FallbackFor == "" {
 				v.Rationale = "Codex usage limit; queued for retry"
 				if err := writeJSONPrivate(filepath.Join(dir, r.ID+".selected.json"), v); err != nil {
 					return err
@@ -1024,7 +1072,7 @@ func resolveApprovalCommand(action string, args []string) error {
 		if r.Request.Role == "epm" && profileOverride != "claude-epm" && profileOverride != "claude-deep" {
 			return errors.New("EPM needs an EPM-capable profile")
 		}
-		if err := validAgentRole(p.Agent, r.Request.Role); err != nil {
+		if err := validAgentRoleFB(p.Agent, r.Request.Role, r.Request.FallbackFor); err != nil {
 			return err
 		}
 		r.Request.Profile, r.Request.Agent = profileOverride, p.Agent

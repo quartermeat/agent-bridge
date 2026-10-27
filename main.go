@@ -27,6 +27,7 @@ type Job struct {
 	Effort         string      `json:"effort,omitempty"`
 	TimeLimit      string      `json:"time_limit,omitempty"`
 	Substitution   string      `json:"substitution,omitempty"`
+	FallbackFor    string      `json:"fallback_for,omitempty"`
 	Depth          int         `json:"depth"`
 	SpawnedBy      *Spawner    `json:"spawned_by"`
 	RequestedBy    *Spawner    `json:"requested_by,omitempty"`
@@ -207,6 +208,7 @@ func start(args []string) error {
 	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
 	spawnedBy := f.String("spawned-by", "", "Agent ID from snapshot; default: detect invoking agent")
 	parentJob := f.String("parent-job", "", "Requesting bridge job ID")
+	fallbackFor := f.String("fallback-for", "", "Usage-halted Codex coder job ID this Claude coder replaces (required for --agent claude --role coder)")
 	var contextPaths contextFlags
 	f.Var(&contextPaths, "context", "Context file or directory relative to AGENT_BRIDGE_CONTEXT_DIR (repeatable, comma-separated)")
 	contextWork := f.Bool("context-work", false, "Allow work-sensitive context selected by --context")
@@ -214,11 +216,27 @@ func start(args []string) error {
 		return err
 	}
 	*role = startRole(*agent, *role)
+	if err := validAgentRoleFB(*agent, *role, *fallbackFor); err != nil {
+		return err
+	}
+	if *fallbackFor != "" {
+		if *agent != "claude" || *role != "coder" {
+			return errors.New("--fallback-for is only for --agent claude --role coder")
+		}
+		s, err := fallbackSnapshot()
+		if err != nil {
+			return err
+		}
+		if err := checkFallback(*fallbackFor, s); err != nil {
+			return err
+		}
+		if *cwd == "" {
+			orig, _ := readJob(*fallbackFor)
+			*cwd = orig.Cwd
+		}
+	}
 	if *cwd == "" {
 		return errors.New("--cwd is required")
-	}
-	if err := validAgentRole(*agent, *role); err != nil {
-		return err
 	}
 	if *profileName == "" {
 		*profileName = defaultProfile(*agent, *role)
@@ -324,7 +342,7 @@ func start(args []string) error {
 	} else if parent := ancestorJob(os.Getppid()); parent != nil {
 		depth = parent.Depth + 1
 	}
-	j := Job{ID: id, Name: *name, Agent: *agent, Role: *role, Profile: profile.Name, Model: profile.Model, Effort: profile.Effort, TimeLimit: profile.TimeLimit.String(), Depth: depth, SpawnedBy: spawner, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt"), ContextFiles: contextFiles}
+	j := Job{ID: id, Name: *name, Agent: *agent, Role: *role, Profile: profile.Name, Model: profile.Model, Effort: profile.Effort, TimeLimit: profile.TimeLimit.String(), Depth: depth, SpawnedBy: spawner, FallbackFor: *fallbackFor, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt"), ContextFiles: contextFiles}
 	if err := writeJob(j); err != nil {
 		return err
 	}

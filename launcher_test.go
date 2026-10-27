@@ -464,3 +464,58 @@ func TestApproveLaunchesWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLaunchFallbackRequest(t *testing.T) {
+	r, s, _ := launchFixture(t)
+	halt := &Halt{Kind: "usage_limit", Code: "usage_limit_exceeded", Source: "test", DetectedAt: time.Now().UTC()}
+	dir, _ := jobDir("halted")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJob(Job{ID: "halted", Agent: "codex", Role: "coder", Status: "halted", Halt: halt, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	pdir, _ := jobDir("parent")
+	if err := os.MkdirAll(pdir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJob(Job{ID: "parent", Agent: "claude", Role: "epm", Status: "running", WorkerPID: os.Getpid(), WorkerStart: processStart(os.Getpid())}); err != nil {
+		t.Fatal(err)
+	}
+	r.Requester = requester{JobID: "parent"}
+	r.Request.Role, r.Request.Agent, r.Request.FallbackFor = "coder", "claude", "halted"
+	if err := checkLaunchRules(r, s); err != nil {
+		t.Fatalf("eligible fallback: %v", err)
+	}
+	r.Request.FallbackFor = ""
+	if err := checkLaunchRules(r, s); err == nil {
+		t.Fatal("Claude coder without fallback_for passed")
+	}
+	r.Request.FallbackFor = "halted"
+	s.Agents = append(s.Agents, AgentUsage{Provider: "claude", ActivityState: "halted_usage"})
+	if err := checkLaunchRules(r, s); err == nil || !strings.Contains(err.Error(), "Claude usage limit") {
+		t.Fatalf("exhausted Claude: %v", err)
+	}
+	// Model verdict may not drop the fallback agent or add the field.
+	if _, err := parseModelVerdict(`{"verdict":"approve","agent":"codex","role":"coder","rationale":"x"}`, r.Request, true); err == nil {
+		t.Fatal("verdict moved fallback to Codex")
+	}
+	if _, err := parseModelVerdict(`{"verdict":"approve","agent":"claude","role":"coder","fallback_for":"x","rationale":"x"}`, r.Request, true); err == nil {
+		t.Fatal("model supplied fallback_for")
+	}
+	v, err := parseModelVerdict(`{"verdict":"approve","agent":"claude","role":"coder","rationale":"x"}`, r.Request, true)
+	if err != nil || v.Profile != "claude-std" {
+		t.Fatalf("fallback verdict = %+v, %v", v, err)
+	}
+	r.Request.FallbackFor = ""
+	if _, err := parseModelVerdict(`{"verdict":"approve","agent":"claude","role":"coder","rationale":"x"}`, r.Request, true); err == nil {
+		t.Fatal("Claude coder verdict without fallback_for")
+	}
+	req, err := parseLaunchYAML([]byte("launch: v1\nrole: coder\nagent: claude\nrepo: /a\ntask: t\nprompt_file: /p\nreason: r\nfallback_for: halted\n"))
+	if err != nil || req.FallbackFor != "halted" {
+		t.Fatalf("parse: %+v %v", req, err)
+	}
+	if _, err := parseLaunchYAML([]byte("launch: v1\nrole: coder\nagent: claude\nrepo: /a\ntask: t\nprompt_file: /p\nreason: r\n")); err == nil {
+		t.Fatal("Claude coder request without fallback_for parsed")
+	}
+}
