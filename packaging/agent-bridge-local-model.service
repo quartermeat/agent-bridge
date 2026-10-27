@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Bridge pinned local EPM model
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-bridge local-model keep
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -651,9 +651,9 @@ func modelLaunchVerdict(ctx context.Context, r launchRecord) (modelVerdict, stri
 	ctx = context.WithValue(ctx, localActivityRoleKey{}, "dispatcher")
 	localID := ""
 	ctx = context.WithValue(ctx, localActivityIDKey{}, &localID)
-	model := os.Getenv("AGENT_BRIDGE_LAUNCHER_MODEL")
-	if model == "" {
-		model = "qwen3-coder:30b"
+	model := launcherModel()
+	if err := waitForModelLease(ctx); err != nil {
+		return modelVerdict{}, "", err
 	}
 	base, err := ollamaBase()
 	if err != nil {

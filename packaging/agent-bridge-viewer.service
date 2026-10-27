@@ -1,0 +1,13 @@
+[Unit]
+Description=Agent Bridge always-up terminal viewer
+PartOf=graphical-session.target
+After=graphical-session.target agent-bridge-monitor.service
+
+[Service]
+Type=simple
+ExecStart=xfce4-terminal --disable-server --title "Agent Viewer" -x %h/.local/bin/agent-bridge watch
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=graphical-session.target

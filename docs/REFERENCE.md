@@ -13,16 +13,27 @@ agent-bridge watch --once             # print one plain frame
 agent-bridge speak --text 'Agent bridge is ready.'
 ```
 
-## Background monitor
+## Always-up apps
 
-Build and install the binary, then enable the user service:
+Install the binary and the four user units. The viewer belongs to the graphical session; the others run under the user manager.
 
 ```bash
 go build -o ~/.local/bin/agent-bridge .
-install -Dm644 packaging/agent-bridge-monitor.service ~/.config/systemd/user/agent-bridge-monitor.service
+for unit in monitor launcher viewer local-model; do
+  install -Dm644 "packaging/agent-bridge-${unit}.service" "$HOME/.config/systemd/user/agent-bridge-${unit}.service"
+done
+install -Dm644 packaging/agent-bridge-viewer.desktop "$HOME/.local/share/applications/agent-bridge-viewer.desktop"
 systemctl --user daemon-reload
-systemctl --user enable --now agent-bridge-monitor.service
+systemctl --user enable --now agent-bridge-monitor.service agent-bridge-launcher.service agent-bridge-local-model.service agent-bridge-viewer.service
 ```
+
+`agent-bridge-monitor.service` samples activity; `agent-bridge-launcher.service` handles launch requests; `agent-bridge-viewer.service` runs `watch` in an XFCE terminal; `agent-bridge-local-model.service` keeps the launcher's EPM model loaded in Ollama. The model defaults to `AGENT_BRIDGE_LAUNCHER_MODEL` or `qwen3-coder:30b`; configure Ollama and pull the model first. The local-model unit retries with backoff until Ollama is available, regardless of whether Ollama starts before or after the user unit. `systemctl --user stop agent-bridge-viewer.service` closes the viewer window. The Agent Viewer app-menu entry restarts it. Disable a unit with `systemctl --user disable --now UNIT.service` and enable it again with `systemctl --user enable --now UNIT.service`.
+
+Wrap VRAM-heavy work with `agent-bridge local-model yield --reason 'FLUX render' -- render-command arg1 arg2`. This creates a private lease, unloads the model, waits up to 30 seconds for Ollama to report it gone, runs the command with inherited stdio, then releases the lease. Several renders can hold leases concurrently; stale leases from dead processes are ignored. The last lease re-pins when its command ends; the keep service also checks every 60 seconds by default. `agent-bridge local-model status --json` reports model, loaded/pinned/yielded state, leases, and VRAM bytes. During a yield the launcher waits up to its 30-second model verdict deadline, then escalates a request if the model remains unavailable.
+
+## Background monitor
+
+Install and enable the monitor with the other user units as shown above.
 
 The daemon starts under the user systemd manager and refreshes `~/.local/state/agent-bridge/latest.json` every two seconds. It writes the file atomically with user-only permissions. Other monitors can read that file or call `agent-bridge latest`; `latest` exits nonzero if the sample is older than ten seconds. `snapshot` always collects a fresh sample. `watch` uses the daemon's sample when available and falls back to direct sampling otherwise. Closing the viewer window does not stop the daemon. In a terminal, `watch` uses the alternate screen and restores the prior display on exit, so redraws do not fill scrollback. `j`/`k` and arrow keys scroll one line; `PgUp`/`PgDn` and space scroll one page; `g`/`G` jump to top/bottom. `c` toggles compact active agents/jobs; `f` cycles all, active, jobs, and local filters; `q` or Ctrl-C quits. The last row shows time, daemon/direct origin, visible line range, filter, and key hints. Resize redraws the viewport. `--interval` defaults to 2 s and must be at least 500 ms. `--plain` appends frames without escape codes, and `--once` prints one plain frame; non-terminal output automatically uses plain mode.
 
@@ -152,6 +163,6 @@ Local Ollama completions appear as `local` agents with token usage. Ollama `/api
 
 Queue a launch with `agent-bridge request --file launch.yaml`; poll `agent-bridge request-status ID`. The YAML schema and hard rules are in [LAUNCHER.md](LAUNCHER.md). The private spool defaults to `/tmp/agent-bridge-$UID/spool`, or `AGENT_BRIDGE_SPOOL_DIR`. Requests and results are user-owned 0600 files.
 
-`agent-bridge launcher` polls the spool. `--once` processes one pass. It uses the Ollama model selected by `AGENT_BRIDGE_LAUNCHER_MODEL` (default `qwen3-coder:30b`). Failed or malformed model verdicts become escalations. `agent-bridge approvals` lists pending requests; `approve ID` or `deny ID` resolves them. The default timeout is 30 minutes. Decisions are logged to `~/.local/state/agent-bridge/launcher/decisions.jsonl`. The optional unit is `packaging/agent-bridge-launcher.service`; install and enable it only after configuring Ollama and verifying the worktree base paths.
+`agent-bridge launcher` polls the spool. `--once` processes one pass. It uses the Ollama model selected by `AGENT_BRIDGE_LAUNCHER_MODEL` (default `qwen3-coder:30b`). Failed or malformed model verdicts become escalations. `agent-bridge approvals` lists pending requests; `approve ID` or `deny ID` resolves them. The default timeout is 30 minutes. Decisions are logged to `~/.local/state/agent-bridge/launcher/decisions.jsonl`. The always-up unit is `packaging/agent-bridge-launcher.service`; configure Ollama and verify the worktree base paths before enabling it.
 
 Claude jobs use `AGENT_BRIDGE_CLAUDE_BIN` (default `claude`) and write stream JSON events plus final text. Read-only jobs allow Read, Grep, and Glob. Write jobs allow Edit/Write and a limited build/test command list. L1 does not have the L2 tool approval socket.

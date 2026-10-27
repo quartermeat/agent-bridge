@@ -45,7 +45,7 @@ agent-bridge voice-log [--follow] [--lines 50] [--json]
 ```
 
 - `start` launches a Codex or Claude job in a user systemd unit. The default is `--agent codex --role coder`; Codex cannot use `epm`. Read-only is the default. Claude read-only jobs allow Read, Grep, and Glob. Claude write jobs also allow Edit, Write, and the limited Go, Make, formatting, and Git build/review commands described in [the launcher design](docs/LAUNCHER.md). L1 has no per-tool approval prompt. Jobs expose `agent`, `role`, and `depth` in JSON and the live view.
-- `request` queues a `launch: v1` YAML file in a private spool and prints its ID. `request-status` returns queued, pending, approved (with job ID), rejected, denied, or failed. The default spool is `/tmp/agent-bridge-$UID/spool`; override with `AGENT_BRIDGE_SPOOL_DIR`. The `launcher` user service applies hard rules, asks Ollama for a launch verdict, and creates the worktree before starting the job. `approvals` lists escalations; `approve` and `deny` resolve one. The default model is `qwen3-coder:30b` (`AGENT_BRIDGE_LAUNCHER_MODEL`). Install the optional unit from `packaging/agent-bridge-launcher.service` when ready.
+- `request` queues a `launch: v1` YAML file in a private spool and prints its ID. `request-status` returns queued, pending, approved (with job ID), rejected, denied, or failed. The default spool is `/tmp/agent-bridge-$UID/spool`; override with `AGENT_BRIDGE_SPOOL_DIR`. The `launcher` user service applies hard rules, asks Ollama for a launch verdict, and creates the worktree before starting the job. `approvals` lists escalations; `approve` and `deny` resolve one. The default model is `qwen3-coder:30b` (`AGENT_BRIDGE_LAUNCHER_MODEL`). The always-up unit is `packaging/agent-bridge-launcher.service`.
 - Named profiles select model, effort, and wall clock limit. `packaging/profiles.yaml` is the default; `~/.config/agent-bridge/profiles.yaml` overrides it (`AGENT_BRIDGE_PROFILES` for tests). See [job profiles](docs/LAUNCHER-PROFILES.md). The viewer includes local Ollama completions and loaded models.
 - `--context` passes selected files from the context root to a `start` job under the sharing policy; repeat it or separate paths with commas. Work-sensitive files require `--context-work`.
 - `ask` sends one prompt to Grok (xAI API key required) or a local Ollama model and prints the reply. It cannot run tools.
@@ -68,6 +68,28 @@ Voice transcript:
 - `agent-bridge voice-log` prints the last 50 entries (`--lines N`) as chat lines (`HH:MM you: …`, `HH:MM agent: …`, `HH:MM ⚠ approval: …`, `HH:MM you (approval): …`, and dropped speech as `HH:MM (ignored) you: …`), dropping terminal control characters; `--json` prints raw lines; `--follow` keeps tailing across rotation. Open a live window with `xfce4-terminal --title 'Voice transcript' -x agent-bridge voice-log --follow`.
 
 The optional user daemon is `packaging/agent-bridge-voice.service`. Install it under `~/.config/systemd/user/`, then run `systemctl --user daemon-reload` and `systemctl --user enable --now agent-bridge-voice.service` to start listening and keep it available after login. Run `systemctl --user disable --now agent-bridge-voice.service` to stop listening and disable startup. Its packaged source is the Starship analog microphone and its wake phrase is **hey agent**; edit the unit's `ExecStart` for another source or phrase. Check `systemctl --user status agent-bridge-voice.service` and `journalctl --user -u agent-bridge-voice.service` when diagnosing it.
+
+## Always-up apps
+
+The four user units are `agent-bridge-monitor` (fresh snapshots), `agent-bridge-launcher` (launch dispatcher), `agent-bridge-viewer` (XFCE terminal window), and `agent-bridge-local-model` (pinned EPM dispatcher model). Install the binary and units, then enable them:
+
+```bash
+go build -o ~/.local/bin/agent-bridge .
+install -Dm644 packaging/agent-bridge-monitor.service ~/.config/systemd/user/agent-bridge-monitor.service
+install -Dm644 packaging/agent-bridge-launcher.service ~/.config/systemd/user/agent-bridge-launcher.service
+install -Dm644 packaging/agent-bridge-viewer.service ~/.config/systemd/user/agent-bridge-viewer.service
+install -Dm644 packaging/agent-bridge-local-model.service ~/.config/systemd/user/agent-bridge-local-model.service
+install -Dm644 packaging/agent-bridge-viewer.desktop ~/.local/share/applications/agent-bridge-viewer.desktop
+systemctl --user daemon-reload
+systemctl --user enable --now agent-bridge-monitor.service agent-bridge-launcher.service agent-bridge-local-model.service agent-bridge-viewer.service
+```
+
+`systemctl --user stop agent-bridge-viewer.service` closes the window; its app-menu entry restarts it. Disable any unit across logins with `systemctl --user disable --now UNIT.service`. The local model defaults to `AGENT_BRIDGE_LAUNCHER_MODEL` or `qwen3-coder:30b`; its unit retries until Ollama is available. For GPU renders, wrap the command so the model unloads before rendering and the last lease re-pins it when the command ends:
+
+```bash
+agent-bridge local-model yield --reason 'FLUX render' -- render-command arg1 arg2
+agent-bridge local-model status --json
+```
 
 ## Monitoring
 

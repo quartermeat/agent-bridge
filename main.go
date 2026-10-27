@@ -60,6 +60,10 @@ type Spawner struct {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -67,7 +71,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|request|request-status|launcher|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
+		return errors.New("usage: agent-bridge start|request|request-status|launcher|local-model|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
 	}
 	switch args[0] {
 	case "start":
@@ -78,6 +82,8 @@ func run(args []string) error {
 		return requestStatusCommand(args[1:])
 	case "launcher":
 		return launcherCommand(args[1:])
+	case "local-model":
+		return localModelCommand(args[1:])
 	case "approvals":
 		return approvalsCommand(args[1:])
 	case "approve", "deny":

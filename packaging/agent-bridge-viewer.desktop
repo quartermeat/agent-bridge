@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Viewer
+Comment=Open the Agent Bridge activity viewer
+Exec=systemctl --user restart agent-bridge-viewer.service
+Terminal=false
+Categories=Utility;System;
