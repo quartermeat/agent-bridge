@@ -12,6 +12,7 @@ These come from the user's current instructions. Where code enforces them today,
 - Claude handles documents, requirements and schedules. Claude never writes or runs project code.
 - All runnable code work goes to a freshly spawned Codex coder job. A Codex master may code a task directly only when it takes under one minute; anything longer is delegated.
 - EPM runnable code work uses freshly spawned Codex coder jobs, one per task.
+- **User decision (2026-10-28), not yet built:** a local model may hold the EPM role and spawn frontier jobs (Claude sub-EPMs, Codex coders) for subtasks, under the same launcher rules. Recurring jobs are plain scripts whenever possible. When a run needs a large decision tree, the timer triggers the local model in the EPM role to do that run; it spawns frontier jobs only when needed. Triggers are fixed schedules for now; an event-trigger interface may come later.
 - Recurring cron jobs are **Proposal**: the user has not set a recurrence policy (see `ROUTING.md`). Queued local-model decision tasks are a **Proposal** with a measured trial plan in `LOCAL-FEEDBACK.md`. The user wants frontier models to give the local model more bounded work and to monitor how it performs.
 
 ## Problem
@@ -143,6 +144,7 @@ and `watch`.
 ## Open questions
 
 - Should the local model do small tasks itself (L3), or only dispatch and approve?
+  Partly answered 2026-10-28: it may act as an EPM and is the primary cron handler (see Operating rules).
 - Which recurring work becomes a cron job? The user has not set a recurrence
   policy, so cron is not designed here. Queued local-model runs have a proposed
   design with a measured trial in `LOCAL-FEEDBACK.md`; it is not built.

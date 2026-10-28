@@ -41,6 +41,19 @@ The user's requests of 2026-10-26, restated as requirements:
     `LOCAL-FEEDBACK.md`. It does not change items 1 to 10, and it does not answer
     the open cron and GUP questions (Q1 to Q3, Q10).
 
+12. User decision, 2026-10-28: "local models can be ran as the EPM role and
+    spawn frontier models for subtasks. Also this should be primarily who
+    handles chron jobs." A local EPM may request Claude sub-EPMs and Codex
+    coders. Refined the same day: "When possible, chron jobs really should just
+    be scripts. For crazy big decision trees that have to be made, we should
+    use the local model triggered by the chron job. It triggers in an EPM role
+    to do the chron job." So R-cron is a plain script by default; a run whose
+    decision tree is too large for a script is started by the timer as a
+    local-model EPM job. This answers Q1 (simple = expressible as a script)
+    and partly Q3 and Q5. Q2 answered: schedule only for now, event triggers
+    later. Q4 has a direction (complexity: tokens
+    needed vs effort to script); thresholds stay open. Not implemented.
+
 Non-goals: autonomous publishing, financial transactions, GUP deployment, and
 any change to GUP. This document does not touch GUP.
 
@@ -494,11 +507,23 @@ Pending user clarification. None of these is assumed answered.
 
 - Q1. What is a simple task for the cron route (single command, no output
   branching, time limit, no network)?
+  Answered 2026-10-28 (item 12): anything a script can do; larger decision
+  trees run as a timer-triggered local-model EPM job.
 - Q2. What is recurring: a fixed schedule only, or also event-triggered?
+  Answered 2026-10-28: fixed schedule only for now. An event-trigger interface
+  for a recurring job may come later. Whether a run is a script or a local EPM
+  job depends on how complex its decision tree is (item 12).
 - Q3. Cron means user crontab, a systemd user timer, or something else? Who
   approves installing an entry?
 - Q4. What rubric chooses a Claude EPM versus a local EPM, and who decides when
   the call is close?
+  Direction 2026-10-28: "Based on complexity (how big the decision tree is).
+  Maybe based on how many tokens are required to complete the task vs how fast
+  that task can be made into a script." Accepted reading (user, 2026-10-28, "for now"): estimate the tokens a
+  run needs and the effort to script it. Cheap to script means a script; a
+  bounded tree means a local EPM; a large token need means a Claude EPM.
+  Thresholds, and who estimates them, are still open (the local-trial telemetry
+  in `LOCAL-FEEDBACK.md` can supply the numbers).
 - Q5. Does a local EPM run only playbooks, or may it plan freely (L3 in
   `LAUNCHER.md`)?
 - Q6. By "schedules" for Claude, do you mean planning documents, calendar items,
