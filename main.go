@@ -74,7 +74,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-bridge start|request|request-status|launcher|local-model|local-queue|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
+		return errors.New("usage: agent-bridge start|request|request-status|launcher|local-model|local-queue|schedule|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
 	}
 	switch args[0] {
 	case "start":
@@ -89,9 +89,14 @@ func run(args []string) error {
 		return localModelCommand(args[1:])
 	case "local-queue":
 		return localQueueCommand(args[1:])
+	case "schedule":
+		return scheduleCommand(args[1:])
 	case "approvals":
-		return approvalsCommand(args[1:])
+		return combinedApprovalsCommand(args[1:])
 	case "approve", "deny":
+		if len(args) == 2 && strings.HasPrefix(args[1], "schedule-") {
+			return scheduleResolve(args[0], args[1])
+		}
 		return resolveApprovalCommand(args[0], args[1:])
 	case "ask":
 		return ask(args[1:])

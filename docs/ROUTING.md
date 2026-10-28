@@ -236,7 +236,7 @@ Three queues are needed. Only the first exists.
 | --- | --- | --- | --- |
 | Launch queue | `launch/v1` requests for worker jobs | Launcher | Exists (spool) |
 | Local queue | `local/v1` bounded tasks, durable, with telemetry (`LOCAL-FEEDBACK.md`) | Pinned local model, one at a time | Needed; first slice is M5a |
-| Schedule registry | Cron or timer entries | Scheduler, no model | Needed (M4), gated on Q1 to Q3 |
+| Schedule registry | `schedule/v1` fixed-time entries | systemd user timer runs a script, no model | Implemented: approval-gated add/remove, list/show/run, private registry and job records; local EPM reserved |
 
 Proposed unified record for any queued item:
 
@@ -424,9 +424,8 @@ Acceptance:
   partial work stays in its worktree.
 - No test or run path ever changes a coder's agent to Claude.
 
-**M4: routes and schedule registry (design plus code, gated on Q1 to Q3).**
-Deliverable: a `route` field (`launch/v2`), the R-doc path (a Claude EPM whose `owns` are documents only), and the
-schedule registry with the cron semantics the user chose.
+**M4: routes and schedule registry (schedule slice landed).**
+The `schedule/v1` fixed-time registry now supports approval-gated add and remove, user timers, direct script runs, and job records. The `route` field (`launch/v2`) and R-doc path (a Claude EPM whose `owns` are documents only) remain part of the broader M4 design. `local-epm` schedules are reserved until that backend exists.
 Acceptance:
 - `go test ./... -run 'TestRouteValidation|TestDocRouteCodePathRejected|TestScheduleRegistry'` passes.
 - A request with a route that conflicts with its role is rejected with a stable

@@ -65,6 +65,24 @@ An explicit context, session budget, credit, usage, or token rate error produces
 Unacknowledged halted jobs remain in `snapshot` and appear in a prominent `watch` alert. The viewer is read-only. A coordinating agent decides whether to resume, take over under its project rules, or defer the task. Leave a deferred task unacknowledged so the alert stays visible; run `agent-bridge ack JOB_ID` after the task is completed or a replacement worker has taken ownership. The job's `halt` and `acknowledged_at` remain in `list` and `show` for history. A completed job is never marked halted solely because it used many tokens.
 If a provider stops without an explicit limit error, the bridge cannot verify why; inspect that job's final result before accepting it.
 
+## Schedules
+
+A `schedule: v1` YAML file describes one fixed-time job. The ID uses lowercase kebab case; `command` is an argv list whose executable has an absolute path. `cwd` is absolute, `on_calendar` is a systemd `OnCalendar` expression, and `timeout` is a Go duration. Scripts run without a model call.
+
+```yaml
+schedule: v1
+id: daily-check
+kind: script
+command:
+  - /home/me/bin/daily-check
+cwd: /home/me
+on_calendar: daily
+timeout: 5m
+description: Daily check
+```
+
+Run `agent-bridge schedule add FILE`, then inspect `agent-bridge approvals` and `agent-bridge approve REQUEST_ID` or `deny REQUEST_ID`. Approval creates `agent-bridge-schedule-ID.service` and `.timer` under the systemd **user** unit directory, reloads the user manager, and enables the timer. `schedule remove ID` also requires approval; approval disables and removes the user units. `schedule list [--json]`, `schedule show ID`, and `schedule run ID` inspect or run approved entries. Each run creates a private job whose exit code and log paths are available through `agent-bridge list` and `show JOB_ID`. Registry files are private under `~/.local/state/agent-bridge/schedules/`. `kind: local-epm` is reserved and returns `local_epm_not_implemented` when added or run. Event triggers are not implemented.
+
 ## Launch Codex jobs
 
 Build with `go build -o ~/.local/bin/agent-bridge .`.
