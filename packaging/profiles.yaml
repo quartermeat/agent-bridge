@@ -1,4 +1,19 @@
 profiles:
+  ollama-quick:
+    agent: ollama
+    model: qwen3-coder:30b
+    effort: low
+    time_limit: 20m
+  ollama-std:
+    agent: ollama
+    model: qwen3-coder:30b
+    effort: medium
+    time_limit: 60m
+  ollama-epm:
+    agent: ollama
+    model: qwen3-coder:30b
+    effort: medium
+    time_limit: 180m
   codex-quick:
     agent: codex
     model: gpt-6-sol

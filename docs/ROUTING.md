@@ -559,3 +559,7 @@ Pending user clarification. None of these is assumed answered.
   holdout share, the retention period for telemetry, whether raw prompt capture
   may ever be switched on, and whether the trial may run while a GPU render
   holds a lease (the proposal is no: the queue waits).
+
+## Local Ollama roles
+
+`agent-bridge local` and spawned `--agent ollama` sessions start as EPMs. Only `start --agent ollama --role coder` explicitly assigns a coder role. On this owner's host, Carl's file tools use host paths and `run_command` runs as the user without a sandbox. Interactive writes and commands require terminal confirmation unless `--yes` is set. Jobs require `--write`; otherwise writes and commands refuse. Tool calls are logged in `carl/audit.jsonl`, including EPM violations. Neither model text nor a tool result may change the assigned role or bypass launcher approval.

@@ -39,6 +39,11 @@ type requester struct {
 	AgentID string `json:"agent_id,omitempty"`
 	JobID   string `json:"job_id,omitempty"`
 }
+
+func requesterIsEPM(w requester) bool {
+	return w.JobID != "" || strings.HasPrefix(w.AgentID, "local-harness-")
+}
+
 type launchRecord struct {
 	ID        string        `json:"id"`
 	Request   launchRequest `json:"request"`
@@ -154,7 +159,7 @@ func checkFallback(id string, s Snapshot) error {
 }
 
 func validAgentRoleFB(agent, role, fallback string) error {
-	if agent != "codex" && agent != "claude" {
+	if agent != "codex" && agent != "claude" && agent != "ollama" {
 		return fmt.Errorf("invalid agent %q", agent)
 	}
 	if role != "coder" && role != "epm" {
@@ -328,7 +333,7 @@ func parseLaunchYAML(data []byte) (launchRequest, error) {
 			return r, fmt.Errorf("unknown key %q", key)
 		}
 	}
-	if r.Launch != "v1" || (r.Role != "coder" && r.Role != "epm") || (r.Agent != "codex" && r.Agent != "claude" && r.Agent != "auto") || r.Repo == "" || r.Task == "" || r.PromptFile == "" || r.Reason == "" {
+	if r.Launch != "v1" || (r.Role != "coder" && r.Role != "epm") || (r.Agent != "codex" && r.Agent != "claude" && r.Agent != "ollama" && r.Agent != "auto") || r.Repo == "" || r.Task == "" || r.PromptFile == "" || r.Reason == "" {
 		return r, errors.New("missing or invalid launch fields")
 	}
 	if r.FallbackFor != "" && (r.Role != "coder" || r.Agent == "codex") {
@@ -546,13 +551,16 @@ func requesterDepth(w requester, s Snapshot) (int, error) {
 		if j.Status != "running" || !alive(j.WorkerPID, j.WorkerStart) {
 			return 0, errors.New("requester job not running")
 		}
-		if j.Agent != "claude" || j.Role != "epm" {
+		if (j.Agent != "claude" && j.Agent != "ollama") || j.Role != "epm" {
 			return 0, errors.New("coder or Codex job cannot request")
 		}
 		return j.Depth, nil
 	}
 	for _, a := range s.Agents {
 		if a.ID == w.AgentID {
+			if strings.HasPrefix(w.AgentID, "local-harness-") && a.Provider != "local" {
+				return 0, errors.New("requester is not a local EPM")
+			}
 			return 0, nil
 		}
 	}
@@ -565,7 +573,7 @@ func checkLaunchRules(r launchRecord, s Snapshot) error {
 		}
 	}
 	if r.Request.FallbackFor != "" {
-		if r.Requester.JobID == "" {
+		if !requesterIsEPM(r.Requester) {
 			return errors.New("fallback_for needs a running Claude EPM requester")
 		}
 		if err := checkFallback(r.Request.FallbackFor, s); err != nil {
@@ -594,7 +602,7 @@ func checkLaunchRules(r launchRecord, s Snapshot) error {
 	if err != nil {
 		return err
 	}
-	if r.Requester.JobID == "" && r.Request.Role != "epm" {
+	if !requesterIsEPM(r.Requester) && r.Request.Role != "epm" {
 		return errors.New("coordinator may request only an EPM")
 	}
 	if r.Request.Agent == "codex" && r.Request.Role == "epm" {
@@ -603,7 +611,7 @@ func checkLaunchRules(r launchRecord, s Snapshot) error {
 	if depth >= 3 {
 		return errors.New("nesting depth exceeds 3")
 	}
-	if r.Request.Role == "epm" && r.Requester.JobID == "" && r.Request.Agent == "codex" {
+	if r.Request.Role == "epm" && !requesterIsEPM(r.Requester) && r.Request.Agent == "codex" {
 		return errors.New("Codex cannot run the epm role")
 	}
 	profiles, err := loadProfiles()
@@ -621,10 +629,10 @@ func checkLaunchRules(r launchRecord, s Snapshot) error {
 		if err := validAgentRoleFB(p.Agent, r.Request.Role, r.Request.FallbackFor); err != nil {
 			return err
 		}
-		if r.Requester.JobID != "" && r.Request.Profile == "claude-deep" {
+		if requesterIsEPM(r.Requester) && r.Request.Profile == "claude-deep" {
 			return errors.New("requested profile exceeds EPM ceiling")
 		}
-		if r.Request.Role == "epm" && r.Request.Profile != "claude-epm" && r.Request.Profile != "claude-deep" {
+		if r.Request.Role == "epm" && r.Request.Profile != "claude-epm" && r.Request.Profile != "claude-deep" && r.Request.Profile != "ollama-epm" {
 			return errors.New("EPM needs an EPM-capable profile")
 		}
 	}
@@ -679,7 +687,7 @@ func parseModelVerdict(body string, r launchRequest, fromJob bool) (modelVerdict
 		if v.Role != r.Role {
 			return v, errors.New("model changed requested role")
 		}
-		if !fromJob && (v.Agent != "claude" || v.Role != "epm") {
+		if !fromJob && (v.Agent != "claude" && v.Agent != "ollama" || v.Role != "epm") {
 			return v, errors.New("coordinator may launch only Claude EPM")
 		}
 		if v.Profile == "" {
@@ -706,10 +714,10 @@ func parseModelVerdict(body string, r launchRequest, fromJob bool) (modelVerdict
 		if !profileAllowed(v.Profile, fromJob, false) || fromJob && v.Profile == "claude-deep" {
 			return v, errors.New("verdict profile exceeds requester ceiling")
 		}
-		if v.Role == "epm" && v.Profile != "claude-epm" {
+		if v.Role == "epm" && v.Profile != "claude-epm" && v.Profile != "ollama-epm" {
 			return v, errors.New("EPM needs claude-epm profile")
 		}
-		if v.Role == "coder" && v.Profile == "claude-epm" {
+		if v.Role == "coder" && (v.Profile == "claude-epm" || v.Profile == "ollama-epm") {
 			return v, errors.New("claude-epm is for EPM jobs")
 		}
 	}
@@ -731,14 +739,14 @@ func modelLaunchVerdict(ctx context.Context, r launchRecord) (modelVerdict, stri
 	if err != nil {
 		return modelVerdict{}, "", err
 	}
-	prompt := fmt.Sprintf("Request: %s. From EPM: %t. Choose approve, escalate, or reject. On approve choose agent, requested role, and profile. Profile cost order: %s. Pick cheapest fitting profile within requested ceiling. Coordinator may only launch Claude EPM. EPM may launch Codex coder or Claude EPM. Never choose Claude coder; agent:auto for coder means Codex.", mustJSON(r.Request), r.Requester.JobID != "", strings.Join(profileOrder, " < "))
+	prompt := fmt.Sprintf("Request: %s. From EPM: %t. Choose approve, escalate, or reject. On approve choose agent, requested role, and profile. Profile cost order: %s. Pick cheapest fitting profile within requested ceiling. Coordinator may launch an EPM. EPM may launch Codex coder, Claude EPM, or Ollama worker. Claude coder requires a verified fallback_for. Never change the requested role or explicit agent.", mustJSON(r.Request), requesterIsEPM(r.Requester), strings.Join(profileOrder, " < "))
 	h := sha256.Sum256([]byte(prompt))
 	hash := hex.EncodeToString(h[:])
 	body, _, _, _, err := ollamaCompletion(ctx, base, model, "Return only JSON with verdict, agent, role, profile, rationale. No markdown.", prompt)
 	if err != nil {
 		return modelVerdict{}, hash, err
 	}
-	v, err := parseModelVerdict(body, r.Request, r.Requester.JobID != "")
+	v, err := parseModelVerdict(body, r.Request, requesterIsEPM(r.Requester))
 	v.LocalID = localID
 	return v, hash, err
 }
@@ -1086,10 +1094,10 @@ func resolveApprovalCommand(action string, args []string) error {
 		if !ok {
 			return errors.New("unknown override profile")
 		}
-		if r.Request.Role == "epm" && p.Agent != "claude" {
-			return errors.New("EPM profile must use Claude")
+		if r.Request.Role == "epm" && p.Agent != "claude" && p.Agent != "ollama" {
+			return errors.New("EPM profile must use Claude or Ollama")
 		}
-		if r.Request.Role == "epm" && profileOverride != "claude-epm" && profileOverride != "claude-deep" {
+		if r.Request.Role == "epm" && profileOverride != "claude-epm" && profileOverride != "claude-deep" && profileOverride != "ollama-epm" {
 			return errors.New("EPM needs an EPM-capable profile")
 		}
 		if err := validAgentRoleFB(p.Agent, r.Request.Role, r.Request.FallbackFor); err != nil {

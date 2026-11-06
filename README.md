@@ -32,7 +32,10 @@ The coordinator rejects messages that do not parse or exceed 50 words.
 ## Commands
 
 ```bash
-agent-bridge start --cwd DIR --name NAME --prompt-file task.yaml [--agent codex|claude] [--role coder|epm] [--profile NAME] [--fallback-for JOB_ID] [--write] [--spawned-by AGENT_ID] [--context PATH[,PATH...]] [--context-work]
+agent-bridge start --cwd DIR --name NAME --prompt-file task.yaml [--agent codex|claude|ollama] [--role coder|epm] [--profile NAME] [--model M] [--fallback-for JOB_ID] [--write] [--spawned-by AGENT_ID] [--context PATH[,PATH...]] [--context-work]
+agent-bridge local [--model MODEL] [--cwd DIR] [--yes] [--prompt-file F]
+carl [--model MODEL] [--cwd DIR] [--yes] [--prompt-file F]
+carl audit [--n 20]
 agent-bridge ask [--provider grok|ollama] --model MODEL [--prompt-file F] [--name NAME]
 agent-bridge ask --provider ollama --list-models
 agent-bridge request --file launch.yaml | request-status REQUEST_ID
@@ -51,6 +54,8 @@ agent-bridge voice-log [--follow] [--lines 50] [--json]
 - Named profiles select model, effort, and wall clock limit. Coders use `codex-*` profiles and EPMs use `claude-epm` (or `claude-deep` with user approval); `claude-quick` and `claude-std` remain in the file but no role can use them. `packaging/profiles.yaml` is the default; `~/.config/agent-bridge/profiles.yaml` overrides it (`AGENT_BRIDGE_PROFILES` for tests). See [job profiles](docs/LAUNCHER-PROFILES.md). The viewer includes local Ollama completions and loaded models.
 - `--context` passes selected files from the context root to a `start` job under the sharing policy; repeat it or separate paths with commas. Work-sensitive files require `--context-work`.
 - `ask` sends one prompt to Grok (xAI API key required) or a local Ollama model and prints the reply. It cannot run tools.
+- `local` starts Carl, a tool-using Ollama EPM chat, or runs one prompt with `--prompt-file`. Build the direct command with `go build -o ~/.local/bin/carl .`; `carl` accepts the same options. Without `--model`, it lists installed models and marks loaded models with `*`. `/model NAME`, `/models`, `/clear`, and `/exit` control the chat. On this owner's host, file tools can access any user-accessible path and `run_command` runs on the host as the user. Interactive writes and commands confirm through the terminal; `--yes` skips confirmation and appears in the banner. `carl audit` shows the private local tool-call log. This unsandboxed host access is intentional and carries prompt-injection risk. See [local harness](docs/OLLAMA-HARNESS.md).
+- `start --agent ollama` launches Carl in the job registry and user systemd service. The default role is EPM; `--role coder` explicitly assigns coder. Jobs without `--write` refuse writes and commands; jobs with `--write` act without a terminal prompt. The Ollama service adds no sandbox restrictions. EPM violations are audited.
 - `wait` blocks until jobs finish. Coordinators wait on every job they start.
 - `ack` clears a halted job's alert after it has been resolved.
 - `speak` reads `--text` or stdin, synthesizes stereo speech locally with FFmpeg's Flite filter, and plays it through the default PulseAudio/PipeWire sink with `paplay`. It sends no text to a remote service. Use `--voice awb|kal|kal16|rms|slt` to choose a voice (default `slt`). Flite output is quiet, so the render loudness-normalizes it (FFmpeg `loudnorm` to -14 LUFS), applies `--gain DB` (default `6`, range -20 to 20), and hard-limits peaks with `alimiter` before writing 48 kHz stereo; lower the gain if speech is too loud. Temporary text and audio files are private and removed after playback. This command speaks when invoked; it does not automatically read agent replies or monitor events.

@@ -21,7 +21,7 @@ type Profile struct {
 	TimeLimit time.Duration
 }
 
-var profileOrder = []string{"codex-quick", "claude-quick", "codex-std", "claude-std", "codex-deep", "claude-epm", "claude-deep"}
+var profileOrder = []string{"ollama-quick", "codex-quick", "claude-quick", "ollama-std", "codex-std", "claude-std", "ollama-epm", "codex-deep", "claude-epm", "claude-deep"}
 
 func parseProfiles(data []byte) (map[string]Profile, error) {
 	profiles := map[string]Profile{}
@@ -94,7 +94,7 @@ func parseProfiles(data []byte) (map[string]Profile, error) {
 		return nil, errors.New("no profiles")
 	}
 	for name, p := range profiles {
-		if p.Agent != "claude" && p.Agent != "codex" || p.Model == "" || strings.ContainsAny(p.Model, " \t\n") || p.TimeLimit <= 0 || p.Effort != "low" && p.Effort != "medium" && p.Effort != "high" {
+		if p.Agent != "claude" && p.Agent != "codex" && p.Agent != "ollama" || p.Model == "" || strings.ContainsAny(p.Model, " \t\n") || p.TimeLimit <= 0 || p.Effort != "low" && p.Effort != "medium" && p.Effort != "high" {
 			return nil, fmt.Errorf("invalid profile %q", name)
 		}
 	}
@@ -135,6 +135,12 @@ func profileRank(name string) int {
 	return -1
 }
 func defaultProfile(agent, role string) string {
+	if agent == "ollama" {
+		if role == "epm" {
+			return "ollama-epm"
+		}
+		return "ollama-std"
+	}
 	if role == "epm" {
 		return "claude-epm"
 	}

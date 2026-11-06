@@ -14,7 +14,7 @@ import (
 
 func TestProfilesAndCeilings(t *testing.T) {
 	profiles, err := loadProfiles()
-	if err != nil || len(profiles) != 7 || profiles["claude-epm"].TimeLimit != 3*time.Hour {
+	if err != nil || len(profiles) != 10 || profiles["claude-epm"].TimeLimit != 3*time.Hour || profiles["ollama-epm"].Agent != "ollama" {
 		t.Fatalf("profiles: %v %+v", err, profiles)
 	}
 	for _, bad := range []string{"profiles:\n  test:\n    agent: codex\n    model: x\n    effort: huge\n    time_limit: 1m\n", "profiles:\n  test:\n    agent: codex\n    model: x\n    effort: low\n    time_limit: 0s\n", "profiles:\n  test:\n    agent: codex\n    model: x\n    effort: low\n    mystery: x\n    time_limit: 1m\n"} {

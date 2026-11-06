@@ -93,3 +93,7 @@ Claude and Codex.
   token counts, so a narrator or other tool holding GPU memory is visible.
 - **Watch.** `watch` shows local rows with a distinct `local` tag and the model
   name. The GPU panel already present stays as it is.
+
+## Ollama profiles (v0.26.0)
+
+The built-in `ollama-quick`, `ollama-std`, and `ollama-epm` profiles use the local `qwen3-coder:30b` model with 20 minute, 60 minute, and 180 minute limits. An explicit `start --agent ollama --model M` selects another installed model within the chosen profile's time limit. Ollama EPM is the default local role; Ollama coder requires `--role coder`.

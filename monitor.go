@@ -208,6 +208,11 @@ func collectSnapshot() (Snapshot, error) {
 	}
 	sort.Slice(s.Agents, func(i, j int) bool { return s.Agents[i].ID < s.Agents[j].ID })
 	sort.Slice(s.Jobs, func(i, j int) bool { return s.Jobs[i].CreatedAt.After(s.Jobs[j].CreatedAt) })
+	for _, j := range s.Jobs {
+		if j.Agent == "ollama" && j.Usage != nil {
+			s.Agents = append(s.Agents, AgentUsage{ID: "local-job-" + j.ID, Provider: "local", Name: j.Name, Phase: j.Status, Model: j.Model, SessionID: j.ID, SampledAt: now, UsageKnown: true, Usage: *j.Usage, SpawnedBy: j.SpawnedBy})
+		}
+	}
 	for i := range s.Agents {
 		for _, j := range s.Jobs {
 			if j.SessionID != "" && s.Agents[i].SessionID == j.SessionID && s.Agents[i].Provider == "codex" {

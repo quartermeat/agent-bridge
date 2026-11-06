@@ -62,7 +62,10 @@ type Spawner struct {
 }
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	if err := runAs(os.Args[0], os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			os.Exit(exitErr.ExitCode())
@@ -72,6 +75,16 @@ func main() {
 	}
 }
 
+func runAs(executable string, args []string) error {
+	if filepath.Base(executable) == "carl" {
+		if len(args) > 0 && args[0] == "audit" {
+			return carlAudit(args[1:])
+		}
+		return localHarnessCommandNamed("carl", args)
+	}
+	return run(args)
+}
+
 func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: agent-bridge start|request|request-status|launcher|local-model|local-queue|schedule|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
@@ -79,6 +92,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "start":
 		return start(args[1:])
+	case "local":
+		return localHarnessCommand(args[1:])
 	case "request":
 		return requestCommand(args[1:])
 	case "request-status":
@@ -234,7 +249,7 @@ func startRole(agent, role string) string {
 	if role != "" {
 		return role
 	}
-	if agent == "claude" {
+	if agent == "claude" || agent == "ollama" {
 		return "epm"
 	}
 	return "coder"
@@ -245,9 +260,10 @@ func start(args []string) error {
 	cwd := f.String("cwd", "", "Git worktree or project directory")
 	name := f.String("name", "", "Short job label")
 	write := f.Bool("write", false, "Allow workspace-write sandbox")
-	agent := f.String("agent", "codex", "Backend: codex for coder, claude for EPM")
+	agent := f.String("agent", "codex", "Backend: codex, claude, or ollama")
 	role := f.String("role", "", "Role: coder or epm (default: epm with --agent claude, coder with --agent codex)")
 	profileName := f.String("profile", "", "Named job profile")
+	modelName := f.String("model", "", "Ollama model override")
 	promptFile := f.String("prompt-file", "", "Prompt file; default: stdin")
 	spawnedBy := f.String("spawned-by", "", "Agent ID from snapshot; default: detect invoking agent")
 	parentJob := f.String("parent-job", "", "Requesting bridge job ID")
@@ -295,11 +311,17 @@ func start(args []string) error {
 	if profile.Agent != *agent {
 		return errors.New("profile agent does not match --agent")
 	}
-	if *role == "epm" && *profileName != "claude-epm" && *profileName != "claude-deep" {
+	if *modelName != "" {
+		if *agent != "ollama" || strings.ContainsAny(*modelName, " \t\n") {
+			return errors.New("--model requires a valid Ollama model name")
+		}
+		profile.Model = *modelName
+	}
+	if *role == "epm" && *agent != "ollama" && *profileName != "claude-epm" && *profileName != "claude-deep" {
 		return errors.New("EPM needs an EPM-capable profile")
 	}
-	if *role == "coder" && *profileName == "claude-epm" {
-		return errors.New("claude-epm is for EPM jobs")
+	if *role == "coder" && (*profileName == "claude-epm" || *profileName == "ollama-epm") {
+		return errors.New("EPM profile is for EPM jobs")
 	}
 	if f.NArg() != 0 {
 		return errors.New("pass prompt on stdin or with --prompt-file")
@@ -327,7 +349,7 @@ func start(args []string) error {
 	if len(prompt) == 0 || len(prompt) > 1<<20 {
 		return errors.New("prompt must be 1 byte to 1 MiB")
 	}
-	if *agent == "claude" && *role == "epm" && *write {
+	if (*agent == "claude" || *agent == "ollama") && *role == "epm" && *write {
 		if err := validateDocOwns(string(prompt)); err != nil {
 			return err
 		}
@@ -342,8 +364,8 @@ func start(args []string) error {
 	var spawner *Spawner
 	if *parentJob != "" {
 		parent, e := readJob(*parentJob)
-		if e != nil || parent.Status != "running" || parent.Agent != "claude" || parent.Role != "epm" || !alive(parent.WorkerPID, parent.WorkerStart) {
-			return errors.New("parent job is not a running Claude EPM")
+		if e != nil || parent.Status != "running" || (parent.Agent != "claude" && parent.Agent != "ollama") || parent.Role != "epm" || !alive(parent.WorkerPID, parent.WorkerStart) {
+			return errors.New("parent job is not a running EPM")
 		}
 		spawner = &Spawner{AgentID: parent.ID, Provider: parent.Agent, SessionID: parent.SessionID}
 	} else {
@@ -402,6 +424,16 @@ func start(args []string) error {
 		return err
 	}
 	if os.Getenv("AGENT_BRIDGE_LAUNCH_MODE") != "direct" {
+		if *agent == "ollama" {
+			cmd := exec.Command("systemd-run", "--user", "--quiet", "--collect", "--service-type=exec", "--unit=agent-bridge-"+id, "--setenv=AGENT_BRIDGE_STATE_DIR="+r, self, "_worker", id)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				j.Status, j.Error = "failed", strings.TrimSpace(string(out))
+				_ = writeJob(j)
+				return fmt.Errorf("systemd-run: %w: %s", err, strings.TrimSpace(string(out)))
+			}
+			fmt.Println(id)
+			return nil
+		}
 		binEnv, defaultBin := "AGENT_BRIDGE_CODEX_BIN", "codex"
 		if *agent == "claude" {
 			binEnv, defaultBin = "AGENT_BRIDGE_CLAUDE_BIN", "claude"
@@ -466,10 +498,27 @@ func worker(id string) error {
 		return finishError(&j, err)
 	}
 	defer stderr.Close()
-	if j.Agent == "claude" && j.Role == "epm" {
+	if (j.Agent == "claude" || j.Agent == "ollama") && j.Role == "epm" {
 		if err := snapshotClaudeWorktree(j); err != nil {
 			return finishError(&j, err)
 		}
+	}
+	if j.Agent == "ollama" {
+		prompt, err := io.ReadAll(io.LimitReader(stdin, 1<<20+1))
+		if err != nil {
+			return finishError(&j, err)
+		}
+		err = runOllamaJob(&j, prompt, events, stderr)
+		if j.Role == "epm" {
+			if auditErr := auditClaudeJob(&j); auditErr != nil {
+				j.Status = "failed"
+				j.Error = auditErr.Error()
+				_ = writeJob(j)
+				return auditErr
+			}
+			_ = writeJob(j)
+		}
+		return err
 	}
 	var cmd *exec.Cmd
 	if j.Agent == "claude" {
