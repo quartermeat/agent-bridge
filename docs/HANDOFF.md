@@ -1,5 +1,9 @@
 # Voice daemon handoff
 
+## v0.25.1 (2026-11-06)
+
+Bridge snapshot refreshes now durably acknowledge an original usage-limit halt after its explicitly linked `fallback_for` replacement completes. Starting a replacement does not clear the alert; an unrelated completion or recovered quota also leaves it visible. The original halt remains in job history. The viewer continues to render bridge state without changing it.
+
 Update 2026-10-25 (v0.18.0): the packaged service runs `--agent claude --access work`. Claude has its full tool set; Read, Grep and Glob run freely and every other tool call is relayed by the hidden `voice-approval-mcp` permission-prompt server to the daemon's private socket `~/.local/state/agent-bridge/voice/approval.sock`, which speaks a summary and approves only on the exact phrases approve, approved, yes approve or confirm (otherwise deny, 20 s window). Conversation text goes to the private `~/.local/state/agent-bridge/voice/transcript.jsonl`; watch it with `agent-bridge voice-log --follow`. Wake phrases now also match mid-utterance (text after the last occurrence; a bare "agent" stays leading-only). Real `claude -p` smoke runs confirmed deny, allow and no-socket paths; a live microphone approval still needs a user check. The older notes below describe the earlier read-only design.
 
 As of 2026-10-25, `agent-bridge voice` uses the user's Starship analog microphone, local Voxtype transcription, a persistent Codex app-server thread, and local Flite speech. The packaged user service is enabled for the graphical session and listens for **hey agent**. It does not attach to the desktop conversation. The Codex thread runs read-only and declines permission grants; writing through voice requires a separate approval design.

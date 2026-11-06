@@ -4,9 +4,115 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestFallbackHaltReconcilesOnlyAfterLinkedCompletion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_BRIDGE_HOME", home)
+	t.Setenv("AGENT_BRIDGE_STATE_DIR", filepath.Join(home, "bridge"))
+	t.Setenv("AGENT_BRIDGE_ACTIVITY_DIR", filepath.Join(home, "activity"))
+	created := time.Now().UTC().Add(-2 * time.Hour)
+	halt := &Halt{Kind: "usage_limit", Code: "usage_limit_exceeded", DetectedAt: created}
+	for _, j := range []Job{
+		{ID: "original", Status: "halted", Halt: halt, CreatedAt: created},
+		{ID: "unrelated", Status: "completed", CreatedAt: created.Add(time.Minute)},
+		{ID: "replacement", Status: "running", FallbackFor: "original", CreatedAt: created.Add(2 * time.Minute)},
+	} {
+		dir, _ := jobDir(j.ID)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertOpen := func() {
+		t.Helper()
+		s, err := collectSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, err := readJob("original")
+		if err != nil || j.AcknowledgedAt != nil {
+			t.Fatalf("unresolved halt was cleared: %+v, %v", j, err)
+		}
+		found := false
+		for _, shown := range s.Jobs {
+			found = found || shown.ID == "original"
+		}
+		if !found {
+			t.Fatal("unresolved halt missing from snapshot")
+		}
+	}
+	assertOpen()
+	for _, status := range []string{"queued", "failed"} {
+		j, _ := readJob("replacement")
+		j.Status = status
+		if err := writeJob(j); err != nil {
+			t.Fatal(err)
+		}
+		assertOpen()
+	}
+	j, _ := readJob("replacement")
+	j.Status = "completed"
+	if err := writeJob(j); err != nil {
+		t.Fatal(err)
+	}
+	s, err := collectSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := readJob("original")
+	if err != nil || original.AcknowledgedAt == nil || original.Halt == nil || original.Status != "halted" {
+		t.Fatalf("resolved halt history: %+v, %v", original, err)
+	}
+	for _, shown := range s.Jobs {
+		if shown.ID == "original" && shown.AcknowledgedAt == nil {
+			t.Fatalf("snapshot kept alert: %+v", shown)
+		}
+	}
+	if strings.Contains(strings.Join(renderWatchFrame(s, "test", map[string]TokenUsage{}), "\n"), "JOB original HALTED") {
+		t.Fatal("resolved halt still rendered as an alert")
+	}
+	// Simulate simultaneous monitor samples that each saw the same open halt.
+	original.AcknowledgedAt = nil
+	if err := writeJob(original); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			jobs := map[string]Job{"original": original, "replacement": j}
+			errs <- reconcileFallbackHalts(jobs)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	original, err = readJob("original")
+	if err != nil || original.AcknowledgedAt == nil {
+		t.Fatalf("concurrent acknowledgement missing: %+v, %v", original, err)
+	}
+	acknowledgedAt := *original.AcknowledgedAt
+	if _, err := collectSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+	original, err = readJob("original")
+	if err != nil || original.AcknowledgedAt == nil || !original.AcknowledgedAt.Equal(acknowledgedAt) {
+		t.Fatalf("acknowledgement changed on repeat: %+v, %v", original, err)
+	}
+}
 
 func TestSnapshotMapsActivityToUsage(t *testing.T) {
 	home := t.TempDir()

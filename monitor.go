@@ -183,6 +183,7 @@ func collectSnapshot() (Snapshot, error) {
 	jobEntries, err := os.ReadDir(filepath.Join(r, "jobs"))
 	if err == nil {
 		s.Sources = append(s.Sources, SourceStatus{Name: "bridge-jobs", Available: true})
+		jobs := make(map[string]Job, len(jobEntries))
 		for _, e := range jobEntries {
 			if !e.IsDir() {
 				continue
@@ -192,6 +193,12 @@ func collectSnapshot() (Snapshot, error) {
 				continue
 			}
 			j = current(j)
+			jobs[j.ID] = j
+		}
+		if err := reconcileFallbackHalts(jobs); err != nil {
+			return s, err
+		}
+		for _, j := range jobs {
 			if j.Status == "running" || j.Status == "starting" || j.Status == "queued" || (j.Status == "halted" && j.AcknowledgedAt == nil) || now.Sub(j.UpdatedAt) < time.Hour {
 				s.Jobs = append(s.Jobs, j)
 			}
@@ -237,6 +244,26 @@ func collectSnapshot() (Snapshot, error) {
 		s.Sources = append(s.Sources, SourceStatus{Name: "repo-attention-feed", Detail: err.Error()})
 	}
 	return s, nil
+}
+
+// A replacement takes over a halted job only after it completes successfully.
+// Scanning all jobs keeps reconciliation effective after monitor downtime.
+func reconcileFallbackHalts(jobs map[string]Job) error {
+	for _, replacement := range jobs {
+		if replacement.Status != "completed" || replacement.FallbackFor == "" {
+			continue
+		}
+		original, ok := jobs[replacement.FallbackFor]
+		if !ok || original.Status != "halted" || original.Halt == nil || original.Halt.Kind != "usage_limit" || original.AcknowledgedAt != nil {
+			continue
+		}
+		updated, err := acknowledgeHalt(original.ID)
+		if err != nil {
+			return fmt.Errorf("acknowledge resolved halt %s: %w", original.ID, err)
+		}
+		jobs[original.ID] = updated
+	}
+	return nil
 }
 
 func classifyAgent(a *AgentUsage, jobs []Job) {

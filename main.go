@@ -196,6 +196,40 @@ func writeJob(j Job) error {
 	return os.Rename(tmp, filepath.Join(dir, "job.json"))
 }
 
+// acknowledgeHalt serializes read/modify/write across monitor processes and
+// manual acknowledgements. A halted job has no active worker writing its record.
+func acknowledgeHalt(id string) (Job, error) {
+	dir, err := jobDir(id)
+	if err != nil {
+		return Job{}, err
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, "ack.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return Job{}, err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return Job{}, err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	j, err := readJob(id)
+	if err != nil {
+		return Job{}, err
+	}
+	j = current(j)
+	if j.Status != "halted" {
+		return j, fmt.Errorf("job is %s, not halted", j.Status)
+	}
+	if j.AcknowledgedAt == nil {
+		now := time.Now().UTC()
+		j.AcknowledgedAt = &now
+		if err := writeJob(j); err != nil {
+			return Job{}, err
+		}
+	}
+	return j, nil
+}
+
 func startRole(agent, role string) string {
 	if role != "" {
 		return role
@@ -950,20 +984,9 @@ func ack(args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: agent-bridge ack ID")
 	}
-	j, err := readJob(args[0])
+	j, err := acknowledgeHalt(args[0])
 	if err != nil {
 		return err
-	}
-	j = current(j)
-	if j.Status != "halted" {
-		return fmt.Errorf("job is %s, not halted", j.Status)
-	}
-	if j.AcknowledgedAt == nil {
-		now := time.Now().UTC()
-		j.AcknowledgedAt = &now
-		if err := writeJob(j); err != nil {
-			return err
-		}
 	}
 	return json.NewEncoder(os.Stdout).Encode(j)
 }
