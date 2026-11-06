@@ -1,5 +1,9 @@
 # Voice daemon handoff
 
+## v0.25.2 (2026-11-06)
+
+The terminal viewer omits idle local agent rows and the synthetic loaded Ollama agent row. It still shows active local work, bridge jobs, and loaded models in VRAM. The empty-activity line now reflects visible agents. Snapshot and latest JSON are unchanged.
+
 ## v0.25.1 (2026-11-06)
 
 Bridge snapshot refreshes now durably acknowledge an original usage-limit halt after its explicitly linked `fallback_for` replacement completes. Starting a replacement does not clear the alert; an unrelated completion or recovered quota also leaves it visible. The original halt remains in job history. The viewer continues to render bridge state without changing it.

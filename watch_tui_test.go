@@ -83,6 +83,56 @@ func TestPlainFrameNoEscapes(t *testing.T) {
 	}
 }
 
+func TestWatchHidesIdleLocalAndLoadedOllamaRows(t *testing.T) {
+	s := Snapshot{
+		SampledAt: time.Now(),
+		Agents: []AgentUsage{
+			{ID: "idle-local", Provider: "local", ActivityState: "idle", Model: "old-local"},
+			{ID: "loaded-ollama", Provider: "local", Name: "ollama", ActivityState: "loaded", Model: "resident-model"},
+		},
+		Jobs:        []Job{{ID: "running-job", Status: "running"}},
+		LocalModels: []LocalModel{{Name: "resident-model"}},
+	}
+	previous := map[string]TokenUsage{}
+	frame := strings.Join(renderWatchFrame(s, "test", previous), "\n")
+	for _, want := range []string{"No fresh agent activity.", "running-job", "Loaded Ollama models:", "resident-model: VRAM"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("missing %q in frame: %s", want, frame)
+		}
+	}
+	for _, hidden := range []string{"old-local", "local   loaded", "local   idle"} {
+		if strings.Contains(frame, hidden) {
+			t.Errorf("unexpected %q in frame: %s", hidden, frame)
+		}
+	}
+	if len(previous) != 0 || len(s.Agents) != 2 {
+		t.Fatalf("render changed hidden usage or snapshot: previous=%v agents=%v", previous, s.Agents)
+	}
+}
+
+func TestWatchKeepsActiveLocalAndClaudeRows(t *testing.T) {
+	s := Snapshot{
+		SampledAt: time.Now(),
+		Agents: []AgentUsage{
+			{ID: "idle-local", Provider: "local", ActivityState: "idle", Model: "old-local"},
+			{ID: "working-local", Provider: "local", ActivityState: "working", Model: "live-local"},
+			{ID: "error-local", Provider: "local", ActivityState: "error", Model: "failed-local"},
+			{ID: "halted-local", Provider: "local", ActivityState: "halted", Model: "halted-local"},
+			{ID: "idle-claude", Provider: "claude", ActivityState: "idle", Model: "claude-model"},
+			{ID: "active-codex", Provider: "codex", ActivityState: "active", Model: "codex-model"},
+		},
+	}
+	frame := strings.Join(renderWatchFrame(s, "test", map[string]TokenUsage{}), "\n")
+	for _, want := range []string{"live-local", "failed-local", "halted-local", "claude-model", "codex-model"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("missing %q in frame: %s", want, frame)
+		}
+	}
+	if strings.Contains(frame, "old-local") || strings.Contains(frame, "No fresh agent activity.") {
+		t.Fatalf("incorrect visible agent count or idle filtering: %s", frame)
+	}
+}
+
 func TestWatchFallbackAndStaleLimits(t *testing.T) {
 	s := Snapshot{
 		SampledAt:      time.Now(),

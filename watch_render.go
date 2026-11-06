@@ -34,10 +34,12 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 			}
 		}
 	}
-	if len(s.Agents) == 0 {
-		fmt.Fprintln(&b, "No fresh agent activity.")
-	}
+	visibleAgents := 0
 	for _, a := range s.Agents {
+		if a.Provider == "local" && (a.ActivityState == "idle" || (a.ActivityState == "loaded" && a.Name == "ollama")) {
+			continue
+		}
+		visibleAgents++
 		prior, seen := previous[a.ID]
 		fallback := agentFallback(a, s.Jobs)
 		marker := ""
@@ -66,6 +68,9 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 		}
 		fmt.Fprintln(&b)
 		previous[a.ID] = a.Usage
+	}
+	if visibleAgents == 0 {
+		fmt.Fprintln(&b, "No fresh agent activity.")
 	}
 	fmt.Fprintln(&b, "\nBridge jobs:")
 	if len(s.Jobs) == 0 {
