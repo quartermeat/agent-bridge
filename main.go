@@ -80,6 +80,9 @@ func runAs(executable string, args []string) error {
 		if len(args) > 0 && args[0] == "audit" {
 			return carlAudit(args[1:])
 		}
+		if err := refuseWorkerLaunch(false); err != nil {
+			return err
+		}
 		return localHarnessCommandNamed("carl", args)
 	}
 	return run(args)
@@ -89,12 +92,21 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: agent-bridge start|request|request-status|launcher|local-model|local-queue|schedule|approvals|approve|deny|ask|list|show|wait|ack|stop|snapshot|latest|watch|daemon|speak|voice|voice-log")
 	}
+	if err := refuseWorkerCommand(args); err != nil {
+		return err
+	}
 	switch args[0] {
 	case "start":
 		return start(args[1:])
 	case "local":
+		if err := refuseWorkerLaunch(false); err != nil {
+			return err
+		}
 		return localHarnessCommand(args[1:])
 	case "request":
+		if err := refuseWorkerLaunch(true); err != nil {
+			return err
+		}
 		return requestCommand(args[1:])
 	case "request-status":
 		return requestStatusCommand(args[1:])
@@ -105,6 +117,11 @@ func run(args []string) error {
 	case "local-queue":
 		return localQueueCommand(args[1:])
 	case "schedule":
+		if len(args) > 1 && (args[1] == "add" || args[1] == "run") {
+			if err := refuseWorkerLaunch(false); err != nil {
+				return err
+			}
+		}
 		return scheduleCommand(args[1:])
 	case "approvals":
 		return combinedApprovalsCommand(args[1:])
@@ -114,6 +131,9 @@ func run(args []string) error {
 		}
 		return resolveApprovalCommand(args[0], args[1:])
 	case "ask":
+		if err := refuseWorkerLaunch(false); err != nil {
+			return err
+		}
 		return ask(args[1:])
 	case "list":
 		return list(args[1:])
@@ -256,6 +276,9 @@ func startRole(agent, role string) string {
 }
 
 func start(args []string) error {
+	if err := refuseWorkerLaunch(false); err != nil {
+		return err
+	}
 	f := flag.NewFlagSet("start", flag.ContinueOnError)
 	cwd := f.String("cwd", "", "Git worktree or project directory")
 	name := f.String("name", "", "Short job label")
@@ -367,6 +390,9 @@ func start(args []string) error {
 		if e != nil || parent.Status != "running" || (parent.Agent != "claude" && parent.Agent != "ollama") || parent.Role != "epm" || !alive(parent.WorkerPID, parent.WorkerStart) {
 			return errors.New("parent job is not a running EPM")
 		}
+		if parent.Depth >= maxJobDepth {
+			return fmt.Errorf("nesting depth exceeds %d", maxJobDepth)
+		}
 		spawner = &Spawner{AgentID: parent.ID, Provider: parent.Agent, SessionID: parent.SessionID}
 	} else {
 		spawner, err = resolveSpawner(*spawnedBy)
@@ -394,6 +420,7 @@ func start(args []string) error {
 	if len(contextFiles) != 0 {
 		prompt = contextPrompt(prompt, dir, contextFiles)
 	}
+	prompt = append([]byte(workerRoleBlock(id, *role)), prompt...)
 	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), prompt, 0600); err != nil {
 		return err
 	}
@@ -411,8 +438,6 @@ func start(args []string) error {
 	}
 	if *parentJob != "" {
 		parent, _ := readJob(*parentJob)
-		depth = parent.Depth + 1
-	} else if parent := ancestorJob(os.Getppid()); parent != nil {
 		depth = parent.Depth + 1
 	}
 	j := Job{ID: id, Name: *name, Agent: *agent, Role: *role, Profile: profile.Name, Model: profile.Model, Effort: profile.Effort, TimeLimit: profile.TimeLimit.String(), Depth: depth, SpawnedBy: spawner, FallbackFor: *fallbackFor, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt"), ContextFiles: contextFiles}
@@ -548,6 +573,7 @@ func worker(id string) error {
 		cmd = exec.Command(bin, append(args, "-")...)
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, events, stderr
+	cmd.Env = jobEnv(j)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return finishError(&j, err)

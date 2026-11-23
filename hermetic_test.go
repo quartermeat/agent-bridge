@@ -23,7 +23,19 @@ func TestMain(m *testing.M) {
 	os.Setenv("OLLAMA_HOST", "127.0.0.1:1")
 	// Never read the host's real Codex sessions for rate limits.
 	os.Setenv("CODEX_HOME", "/nonexistent/agent-bridge-test-codex")
-	os.Exit(m.Run())
+	// Tests may run inside a real bridge job: never see its state or identity,
+	// or the worker launch guard would refuse tests that start jobs.
+	for _, k := range []string{"AGENT_BRIDGE_JOB_ID", "AGENT_BRIDGE_JOB_ROLE", "AGENT_BRIDGE_JOB_DEPTH"} {
+		os.Unsetenv(k)
+	}
+	state, err := os.MkdirTemp("", "agent-bridge-test-state")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("AGENT_BRIDGE_STATE_DIR", state)
+	code := m.Run()
+	os.RemoveAll(state)
+	os.Exit(code)
 }
 
 type failingTransport struct{}

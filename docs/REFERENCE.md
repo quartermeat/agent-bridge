@@ -175,6 +175,14 @@ large line-hash state or running Git for every viewer refresh.
 
 `agent-bridge start` accepts `--agent codex|claude` and `--role coder|epm`. The default agent is Codex. `--agent claude` defaults to role `epm` and profile `claude-epm`; Codex defaults to role `coder` and profile `codex-std`. Codex EPM and Claude coder are rejected. Jobs contain `agent`, `role`, and `depth`, including `list`, `show`, `snapshot`, and `watch`. Legacy jobs read as Codex/coder/depth 0.
 
+### Worker roles
+
+Every job's `prompt.txt` starts with a fixed role block naming its job ID and role. It says the session is a bridge worker, overrides EPM text in `AGENTS.md` or `CLAUDE.md`, and must do its own task. The final message must be one bare `report: v2` YAML document of at most 50 words, without fences or prose, with `status`, `summary`, `checks`, and optional `detail`. Coder blocks prohibit job launches; EPM blocks allow launches only through `agent-bridge request`. The child also gets `AGENT_BRIDGE_JOB_ID`, `AGENT_BRIDGE_JOB_ROLE`, and `AGENT_BRIDGE_JOB_DEPTH`.
+
+Inside a job, the command dispatcher allows only `request-status`, `approvals`, `list`, `show`, `wait`, `snapshot`, `latest`, `watch`, `voice-log`, `schedule list|show`, `local-queue status|report`, and `local-model status|yield`. `local-model yield` remains available because it wraps another command while releasing the GPU. A running EPM may also use `request`; a coder may not. All other commands, including `start`, `ask`, `local`, `launcher`, `approve`, `deny`, `daemon`, `voice`, `_worker`, and the `carl` executable path, are refused inside either role. `carl audit` remains available. Unknown commands and subcommands are refused by default. `start` also rejects a parent whose depth is 3 or more.
+
+The guard uses process ancestry and falls back to the job environment. It stops accidental recursion and is not a security boundary: a process that detaches from its parent and clears its environment, or overrides `AGENT_BRIDGE_STATE_DIR`, is not detected.
+
 `start --profile NAME` selects a profile from `packaging/profiles.yaml`, or the user override at `~/.config/agent-bridge/profiles.yaml` (`AGENT_BRIDGE_PROFILES` overrides the path). Jobs record `profile`, `model`, `effort`, `time_limit`, and `substitution`. The worker halts at its wall clock limit with `halt.code: time_limit`. A launch request may set `profile` as a ceiling, and `approve --profile NAME ID` can override it. The launcher keeps requests over its total, Claude, or Claude-deep cap queued in FIFO order. See [LAUNCHER-PROFILES.md](LAUNCHER-PROFILES.md).
 
 Local Ollama completions appear as `local` agents with token usage. Ollama `/api/ps` models without an active local completion appear as passive `loaded` rows. The token feed includes a `local` total and per-session rows; older consumers can ignore these rows.
