@@ -44,7 +44,7 @@ export WIDGET_TEST_AM_LOG=$test_root/am.log WIDGET_ACTIVITY_CMD=$test_root/am-st
 export WIDGET_JOB_VIEW_BIN=$test_root/view-stub WIDGET_LIVE_SNAPSHOT=$test_root/live.json
 export PATH="$HOME/.local/bin:$PATH"
 decoder=$(command -v gojq || command -v jq)
-"$decoder" -n -c --arg p "$project" --arg o "$other" '{version:1,sources:[{name:"bridge-jobs",available:true},{name:"activity-hooks",available:true}],jobs:[{id:"one",agent:"codex",name:"shared",cwd:$p,status:"running",launcher:"direct"},{id:"two",agent:"codex",name:"shared",cwd:$p,status:"running",launcher:"direct"},{id:"three",agent:"claude",name:"shared",cwd:$o,status:"running",launcher:"direct"},{id:"queued",agent:"codex",name:"queued",cwd:$p,status:"queued"},{id:"shell",agent:"codex",name:"shell",cwd:$p,status:"running",launcher:"tmux"}],agents:[{id:"hook-one",provider:"claude",name:"interactive",cwd:$p,activity_state:"active",host_pid:1234,target:{kind:"tmux",name:"actual"}},{id:"hook-idle",provider:"codex",name:"idle",cwd:$p,activity_state:"idle"}]}' > "$test_root/active.json"
+"$decoder" -n -c --arg p "$project" --arg o "$other" '{version:1,sources:[{name:"bridge-jobs",available:true},{name:"activity-hooks",available:true}],jobs:[{id:"one",agent:"codex",name:"shared",cwd:$p,status:"running",launcher:"direct"},{id:"two",agent:"codex",name:"shared",cwd:$p,status:"running",launcher:"direct"},{id:"three",agent:"claude",role:"epm",name:"shared",cwd:$o,status:"running",launcher:"direct"},{id:"queued",agent:"codex",name:"queued",cwd:$p,status:"queued"},{id:"shell",agent:"codex",name:"shell",cwd:$p,status:"running",launcher:"tmux"}],agents:[{id:"hook-one",provider:"claude",name:"interactive",task:"interactive",cwd:$p,activity_state:"active",host_pid:1234,target:{kind:"tmux",name:"actual"}},{id:"hook-idle",provider:"codex",name:"idle",cwd:$p,activity_state:"idle"}]}' > "$test_root/active.json"
 "$decoder" -n -c '{version:1,sources:[{name:"bridge-jobs",available:true}],jobs:[]}' > "$test_root/idle.json"
 "$decoder" -n -c '{version:1,sources:[{name:"bridge-jobs",available:false}],jobs:[]}' > "$test_root/down.json"
 cp "$test_root/active.json" "$WIDGET_LIVE_SNAPSHOT"
@@ -55,12 +55,13 @@ mkdir -p "$home/.local/state/agent-bridge/widget/views"
 printf "old event copy\n" > "$home/.local/state/agent-bridge/widget/views/old.html"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/active.json"
 [[ $(count_refreshes) -eq 1 ]]
+[[ -x "$home/.shortcuts/Agent monitor" && ! -e "$home/.shortcuts/tasks/Agent monitor" ]]
 [[ ! -e "$home/.shortcuts/Codex · old row" && ! -e "$home/.shortcuts/Codex · shared" ]]
 [[ -f "$home/.shortcuts/Codex · custom" && -f "$home/.shortcuts/tasks/Claude · custom" ]]
-mapfile -t duplicates < <(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name 'Codex · shared · *' | sort)
+mapfile -t duplicates < <(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name 'Codex · Coder · * · working · *' | sort)
 [[ ${#duplicates[@]} -eq 2 ]]
-[[ -x "$home/.shortcuts/tasks/Claude · shared" && -x "$home/.shortcuts/tasks/Claude · interactive" ]]
-[[ ! -e "$home/.shortcuts/tasks/Codex · queued" && ! -e "$home/.shortcuts/tasks/Codex · shell" && ! -e "$home/.shortcuts/tasks/Codex · idle" ]]
+[[ -x "$home/.shortcuts/tasks/Claude · EPM · shared · working" && -x "$home/.shortcuts/tasks/Claude · EPM · interactive · working" ]]
+[[ ! -e "$home/.shortcuts/tasks/Codex · Coder · queued · working" && ! -e "$home/.shortcuts/tasks/Codex · Coder · shell · working" && ! -e "$home/.shortcuts/tasks/Codex · EPM · idle · working" ]]
 for file in "${duplicates[@]}"; do bash -n "$file"; "$file"; done
 [[ $(count_views) -eq 2 ]]
 sort "$WIDGET_TEST_VIEW_LOG" > "$test_root/sorted.log"
@@ -68,20 +69,21 @@ printf 'one\ntwo\n' > "$test_root/expected.log"
 cmp -s "$test_root/expected.log" "$test_root/sorted.log"
 "${duplicates[0]}"
 [[ $(count_views) -eq 3 ]]
-"$home/.shortcuts/tasks/Claude · shared"
+"$home/.shortcuts/tasks/Claude · EPM · shared · working"
 [[ $(count_views) -eq 4 ]]
-"$home/.shortcuts/tasks/Claude · interactive"
+"$home/.shortcuts/tasks/Claude · EPM · interactive · working"
 [[ $(count_activities) -eq 1 ]]
 grep -Fq 'start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.termux/.app.TermuxActivity' "$WIDGET_TEST_AM_LOG"
 [[ ! -e $project/PWN && ! -d $home/.local/state/agent-bridge/widget/views ]]
 # Stale shortcuts are inert before the next refresh.
 cp "$test_root/idle.json" "$WIDGET_LIVE_SNAPSHOT"
-"${duplicates[0]}"; "$home/.shortcuts/tasks/Claude · interactive"
+"${duplicates[0]}"; "$home/.shortcuts/tasks/Claude · EPM · interactive · working"
 [[ $(count_views) -eq 4 && $(count_activities) -eq 1 ]]
 "$source_dir/widget.sh" refresh --snapshot "$test_root/idle.json"
-[[ -x "$home/.shortcuts/tasks/Codex · No working agents" && $(count_refreshes) -eq 2 ]]
+[[ -x "$home/.shortcuts/tasks/No agents" && $(count_refreshes) -eq 2 ]]
+[[ -x "$home/.shortcuts/Agent monitor" ]]
 [[ ! -e ${duplicates[0]} && ! -e ${duplicates[1]} ]]
-"$home/.shortcuts/tasks/Codex · No working agents"
+"$home/.shortcuts/tasks/No agents"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/idle.json"
 [[ $(count_refreshes) -eq 2 && $(count_views) -eq 4 ]]
 : > "$test_root/fail"
@@ -89,19 +91,20 @@ cp "$test_root/idle.json" "$WIDGET_LIVE_SNAPSHOT"
 [[ -e $home/.local/state/agent-bridge/widget/broadcast-pending ]]
 rm "$test_root/fail"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/down.json"
-[[ -x "$home/.shortcuts/tasks/Codex · Status unavailable" && ! -e $home/.local/state/agent-bridge/widget/broadcast-pending ]]
-"$home/.shortcuts/tasks/Codex · Status unavailable"
+[[ -x "$home/.shortcuts/tasks/Status unavailable" && ! -e $home/.local/state/agent-bridge/widget/broadcast-pending ]]
+[[ -x "$home/.shortcuts/Agent monitor" ]]
+"$home/.shortcuts/tasks/Status unavailable"
 printf '{bad json\n' > "$test_root/bad.json"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/bad.json" 2> "$test_root/error.log"
-[[ -x "$home/.shortcuts/tasks/Codex · Status unavailable" ]]
+[[ -x "$home/.shortcuts/tasks/Status unavailable" ]]
 "$decoder" -n -c --arg p "$project" '{version:1,sources:[{name:"bridge-jobs",available:true}],jobs:[{id:"bad",agent:"claude",name:"bad\u0000name",cwd:$p,status:"running"}]}' > "$test_root/nul.json"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/nul.json" 2> "$test_root/error.log"
-[[ -x "$home/.shortcuts/tasks/Codex · Status unavailable" ]]
+[[ -x "$home/.shortcuts/tasks/Status unavailable" ]]
 task="$home/.shortcuts/tasks/Refresh widget"
 printf 'user task\n' > "$task"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/idle.json" 2> "$test_root/error.log"
 [[ $(cat "$task") == 'user task' ]]
-grep -Fq 'refusing to replace unowned task' "$test_root/error.log"
+grep -Fq 'refusing to replace unowned shortcut' "$test_root/error.log"
 # Isolated setup installs supplied helper and is repeatable.
 setup_home=$test_root/setup-home
 mkdir -p -- "$setup_home/.local/bin" "$test_root/setup-bin"
@@ -133,7 +136,7 @@ chmod 700 "$setup_home/.local/bin/gojq" "$setup_home/.local/bin/agent-bridge" "$
   "$source_dir/setup.sh"
   "$source_dir/setup.sh"
   cmp -s "$WIDGET_JOB_VIEW_BIN" "$HOME/.local/bin/widget-job-view"
-  [[ -x "$HOME/.shortcuts/tasks/Codex · No working agents" ]]
+  [[ -x "$HOME/.shortcuts/tasks/No agents" ]]
   [[ -x "$HOME/.shortcuts/tasks/Refresh widget" ]]
   before=$(count_refreshes)
   "$HOME/.shortcuts/tasks/Refresh widget"
@@ -144,10 +147,10 @@ chmod 700 "$setup_home/.local/bin/gojq" "$setup_home/.local/bin/agent-bridge" "$
   [[ $(grep -c '^watcher launch$' "$WIDGET_TEST_TOOL_LOG") -eq 2 ]]
 )
 # Two same-label hooks stay distinct; PID lifetime and terminal attachment gate launcher intents.
-"$decoder" -n -c --arg p "$project" '{version:1,sources:[{name:"bridge-jobs",available:true},{name:"activity-hooks",available:true}],jobs:[],agents:[{id:"native-one",provider:"claude",name:"same",cwd:$p,activity_state:"active",host_pid:111},{id:"native-two",provider:"claude",name:"same",cwd:$p,activity_state:"active",host_pid:222}]}' > "$test_root/hooks.json"
+"$decoder" -n -c --arg p "$project" '{version:1,sources:[{name:"bridge-jobs",available:true},{name:"activity-hooks",available:true}],jobs:[],agents:[{id:"native-one",provider:"claude",name:"same",task:"same",cwd:$p,activity_state:"active",host_pid:111},{id:"native-two",provider:"claude",name:"same",task:"same",cwd:$p,activity_state:"active",host_pid:222}]}' > "$test_root/hooks.json"
 cp "$test_root/hooks.json" "$WIDGET_LIVE_SNAPSHOT"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/hooks.json" 2> "$test_root/error.log"
-mapfile -t native_rows < <(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name 'Claude · same · *' | sort)
+mapfile -t native_rows < <(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name 'Claude · EPM · * · working · *' | sort)
 [[ ${#native_rows[@]} -eq 2 ]]
 "${native_rows[0]}"; "${native_rows[1]}"; "${native_rows[0]}"
 [[ $(count_activities) -eq 4 ]]
@@ -159,7 +162,7 @@ proc_fixture 222 202 0
 before=$(count_activities)
 "${native_rows[0]}"; "${native_rows[1]}"
 [[ $(count_activities) -eq $before ]]
-"$decoder" -n -c --arg p "$project" '{version:1,sources:[{name:"bridge-jobs",available:true},{name:"activity-hooks",available:true}],jobs:[],agents:[{id:"native-one",provider:"claude",name:"same",cwd:$p,activity_state:"active",host_pid:0}]}' > "$test_root/empty-target.json"
+"$decoder" -n -c --arg p "$project" '{version:1,sources:[{name:"bridge-jobs",available:true},{name:"activity-hooks",available:true}],jobs:[],agents:[{id:"native-one",provider:"claude",name:"same",task:"same",cwd:$p,activity_state:"active",host_pid:0}]}' > "$test_root/empty-target.json"
 cp "$test_root/empty-target.json" "$WIDGET_LIVE_SNAPSHOT"
 "${native_rows[0]}"; "${native_rows[1]}"
 [[ $(count_activities) -eq $before ]]
@@ -192,4 +195,51 @@ chmod 700 "$tap_home/.local/bin/agent-bridge"
   printf 'snapshot\nsnapshot\n' > "$test_root/expected-bridge.log"
   cmp -s "$test_root/expected-bridge.log" "$WIDGET_TEST_BRIDGE_LOG"
 )
+# Every open state has one row; a changed task or state replaces its prior shortcut.
+"$decoder" -n -c --arg p "$project" --arg missing "$test_root/deleted" '{version:1,sources:[{name:"bridge-jobs",available:true},{name:"activity-hooks",available:true}],jobs:[{id:"live-job",agent:"codex",role:"coder",name:"Job task",cwd:$p,status:"running",launcher:"direct",session_id:"worker-session"},{id:"gone",agent:"codex",role:"coder",name:"Gone",cwd:$missing,status:"running",launcher:"direct"}],agents:[{id:"worker-hook",provider:"codex",task:"duplicate",cwd:$p,session_id:"worker-session",activity_state:"running_job"},{id:"active",provider:"claude",task:"Active task",cwd:$p,activity_state:"active"},{id:"child",provider:"claude",active_job_ids:["live-job"],task:"Child task",cwd:$p,activity_state:"has_running_children"},{id:"approval",provider:"claude",task:"Approval task",cwd:$p,activity_state:"approval_required"},{id:"ready",provider:"codex",task:"Ready task",cwd:$p,activity_state:"ready"},{id:"halted",provider:"codex",task:"Halted task",cwd:$p,activity_state:"halted_usage"},{id:"error",provider:"codex",task:"Error task",cwd:$p,activity_state:"error"},{id:"idle",provider:"codex",task:"Idle task",cwd:$p,activity_state:"idle"},{id:"unverified",provider:"claude",task:"Unknown task",cwd:$p,activity_state:"unverified"}]}' > "$test_root/states.json"
+"$source_dir/widget.sh" refresh --snapshot "$test_root/states.json"
+[[ ! -e "$home/.shortcuts/tasks/Status unavailable" ]]
+[[ $(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name '* · working' | wc -l) -eq 3 ]]
+for state in 'needs approval' ready 'usage limit' error; do
+  [[ $(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name "* · $state" | wc -l) -eq 1 ]]
+done
+[[ $(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name '*duplicate*' | wc -l) -eq 0 ]]
+"$decoder" '.agents |= map(if .id == "ready" then .task="Renamed task" | .activity_state="active" else . end)' "$test_root/states.json" > "$test_root/changed.json"
+"$source_dir/widget.sh" refresh --snapshot "$test_root/changed.json"
+[[ $(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name '* · working' | wc -l) -eq 4 ]]
+[[ $(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name '* · ready' | wc -l) -eq 0 ]]
+[[ $(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name '*Renamed*' | wc -l) -eq 1 ]]
+# Foreground monitor is single-instance and exits when watch returns.
+cat > "$test_root/monitor-stub" <<'STUB'
+#!/data/data/com.termux/files/usr/bin/bash
+printf 'watch\n' >> "$WIDGET_TEST_MONITOR_LOG"
+read -r key < "$WIDGET_TEST_MONITOR_FIFO"
+[[ $key == q ]]
+STUB
+chmod 700 "$test_root/monitor-stub"
+mkfifo "$test_root/monitor.fifo"
+export WIDGET_MONITOR_BIN=$test_root/monitor-stub
+export WIDGET_TEST_MONITOR_LOG=$test_root/monitor.log WIDGET_TEST_MONITOR_FIFO=$test_root/monitor.fifo
+WIDGET_PROC_ROOT=/proc "$home/.shortcuts/Agent monitor" &
+monitor_pid=$!
+for (( attempt=0; attempt<50; attempt++ )); do [[ -s $WIDGET_TEST_MONITOR_LOG && -s $home/.local/state/agent-bridge/widget/monitor.pid ]] && break; sleep 0.1; done
+[[ $(wc -l < "$WIDGET_TEST_MONITOR_LOG") -eq 1 ]]
+before=$(count_activities)
+WIDGET_PROC_ROOT=/proc "$home/.shortcuts/Agent monitor"
+[[ $(wc -l < "$WIDGET_TEST_MONITOR_LOG") -eq 1 && $(count_activities) -eq $((before + 1)) ]]
+printf 'q\n' > "$WIDGET_TEST_MONITOR_FIFO"
+wait "$monitor_pid"
+[[ ! -e $home/.local/state/agent-bridge/widget/monitor.pid ]]
+# Long row names use the phone-width budget and retain a visible ellipsis.
+"$decoder" -n -c --arg p "$project" '{version:1,sources:[{name:"bridge-jobs",available:true}],jobs:[{id:"long",agent:"codex",name:"A deliberately long task name with many extra words",cwd:$p,status:"running",launcher:"direct"}]}' > "$test_root/long.json"
+"$source_dir/widget.sh" refresh --snapshot "$test_root/long.json"
+mapfile -t long_rows < <(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name 'Codex · Coder · A deliberately* · working')
+[[ ${#long_rows[@]} -eq 1 ]]
+long_title=${long_rows[0]##*/}
+[[ ${#long_title} -le 48 ]]
+[[ ${long_rows[0]} == *'… · working' && ${long_rows[0]} != *' … · working' ]]
+# The user's foreground name is protected from replacement.
+printf 'user monitor\n' > "$home/.shortcuts/Agent monitor"
+"$source_dir/widget.sh" refresh --snapshot "$test_root/idle.json" 2> "$test_root/error.log"
+[[ $(cat "$home/.shortcuts/Agent monitor") == 'user monitor' ]]
 printf 'widget fixtures: OK\n'

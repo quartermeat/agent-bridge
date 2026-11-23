@@ -10,7 +10,7 @@ import (
 
 func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage) []string {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "Claude / Codex / local activity — %s UTC (%s; Ctrl-C to exit)\n\n", s.SampledAt.Format("15:04:05"), origin)
+	fmt.Fprintf(&b, "Agent monitor — %s UTC (%s)\n\n", s.SampledAt.Format("15:04:05"), origin)
 	if s.Steinberger != nil && s.Steinberger.Health != "healthy" {
 		fmt.Fprintf(&b, "*** STEINBERGER UNHEALTHY: %s ***\n", s.Steinberger.Reason)
 	}
@@ -46,7 +46,7 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 		if fallback != nil {
 			marker = " ↺"
 		}
-		fmt.Fprintf(&b, "%-7s %-20s %-20s %s%s\n", a.Provider, a.ActivityState, a.Model, a.Cwd, marker)
+		fmt.Fprintf(&b, "%s %s %s %s%s\n", a.Provider, a.ActivityState, a.Model, a.Cwd, marker)
 		if !a.UsageKnown {
 			fmt.Fprint(&b, "  usage pending")
 		} else {
@@ -77,7 +77,7 @@ func renderWatchFrame(s Snapshot, origin string, previous map[string]TokenUsage)
 		fmt.Fprintln(&b, "  none in the last hour")
 	}
 	for _, j := range s.Jobs {
-		fmt.Fprintf(&b, "  %-24s %-10s %s  %s/%s depth %d", j.ID, j.Status, j.Name, j.Agent, j.Role, j.Depth)
+		fmt.Fprintf(&b, "  %s %s %s  %s/%s depth %d", j.ID, j.Status, j.Name, j.Agent, j.Role, j.Depth)
 		if j.Profile != "" {
 			fmt.Fprintf(&b, "  %s %s/%s limit %s", j.Profile, j.Model, j.Effort, j.TimeLimit)
 		}

@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -143,6 +145,8 @@ func TestSnapshotMapsActivityToUsage(t *testing.T) {
 	claudeRows := "{\"type\":\"assistant\",\"sessionId\":\"" + claudeID + "\",\"cwd\":\"/project\",\"message\":{\"id\":\"m1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":10,\"cache_creation_input_tokens\":3,\"output_tokens\":4}}}\n"
 	claudeRows += claudeRows // repeated streaming record must count once
 	claudeRows += "{\"type\":\"assistant\",\"sessionId\":\"" + claudeID + "\",\"cwd\":\"/project\",\"message\":{\"id\":\"m2\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":5}}}\n"
+	claudeRows += "{\"type\":\"ai-title\",\"aiTitle\":\"Older title\"}\n"
+	claudeRows += "{\"type\":\"ai-title\",\"aiTitle\":\"Widget monitoring\"}\n"
 	if err := os.WriteFile(filepath.Join(claudeDir, claudeID+".jsonl"), []byte(claudeRows), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +157,11 @@ func TestSnapshotMapsActivityToUsage(t *testing.T) {
 	codexRows := "{\"type\":\"session_meta\",\"payload\":{\"id\":\"" + codexID + "\",\"cwd\":\"/project\"}}\n"
 	codexRows += "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-test\"}}\n"
 	codexRows += "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":20,\"cached_input_tokens\":7,\"output_tokens\":6}}}}\n"
+	index := "{\"id\":\"" + codexID + "\",\"thread_name\":\"Old task\"}\n"
+	index += "{\"id\":\"" + codexID + "\",\"thread_name\":\"activity-hooks\"}\n"
+	if err := os.WriteFile(filepath.Join(home, ".codex", "session_index.jsonl"), []byte(index), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-10-10T00-00-00-"+codexID+".jsonl"), []byte(codexRows), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +192,9 @@ func TestSnapshotMapsActivityToUsage(t *testing.T) {
 	}
 	if len(s.Jobs) != 1 || s.Jobs[0].SessionID != codexID || s.Agents[1].SpawnedBy == nil || s.Agents[1].SpawnedBy.AgentID != fixtures[0].id {
 		t.Fatalf("spawn relationship missing: jobs=%+v agent=%+v", s.Jobs, s.Agents[1])
+	}
+	if s.Agents[0].Task != "Widget monitoring" || s.Agents[1].Task != "activity-hooks" {
+		t.Fatalf("tasks: Claude=%q Codex=%q", s.Agents[0].Task, s.Agents[1].Task)
 	}
 	if s.Agents[0].ActivityState != "has_running_children" || len(s.Agents[0].ActiveJobIDs) != 1 || s.Agents[1].ActivityState != "running_job" {
 		t.Fatalf("incorrect job-aware states: Claude=%+v Codex=%+v", s.Agents[0], s.Agents[1])
@@ -244,5 +256,65 @@ func TestClaudeUsageErrorClearsAfterSuccessfulResponse(t *testing.T) {
 	a = AgentUsage{}
 	if err := readClaudeUsage(path, &a); err != nil || a.Halt != nil {
 		t.Fatalf("resolved Claude error remained active: %+v %v", a, err)
+	}
+}
+
+func TestSafeTask(t *testing.T) {
+	got := safeTask("  Title\nwith\x00 control\ttext  ")
+	if got != "Title with control text" {
+		t.Fatalf("safeTask = %q", got)
+	}
+	long := safeTask(strings.Repeat("x", 300))
+	if len(long) > 120 {
+		t.Fatalf("task length = %d", len(long))
+	}
+}
+
+func TestActivityCurrentDelayedWatcher(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude-test.json")
+	script := filepath.Join(dir, "claude-activity-hook.py")
+	if err := os.WriteFile(script, []byte("sleep 10\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	a := activityFile{ID: "claude-test", Phase: "working", SampledAt: now.Add(-20 * time.Second)}
+	if _, ok := activityCurrent(path, a, now); ok {
+		t.Fatal("delayed heartbeat accepted without watcher")
+	}
+	cmd := exec.Command("sh", script, "--watch", path, strconv.Itoa(os.Getpid()), a.ID)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	if err := os.WriteFile(strings.TrimSuffix(path, ".json")+".watch.pid", []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var host int
+	var ok bool
+	for attempt := 0; attempt < 20; attempt++ {
+		host, ok = activityCurrent(path, a, now)
+		if ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ok || host != os.Getpid() {
+		t.Fatalf("validated watcher rejected: host=%d ok=%v", host, ok)
+	}
+	deadHost := exec.Command("sh", script, "--watch", path, "99999999", a.ID)
+	if err := deadHost.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = deadHost.Process.Kill(); _ = deadHost.Wait() }()
+	if err := os.WriteFile(strings.TrimSuffix(path, ".json")+".watch.pid", []byte(strconv.Itoa(deadHost.Process.Pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := activityCurrent(path, a, now); ok {
+		t.Fatal("dead host accepted")
+	}
+	a.SampledAt = now.Add(-31 * time.Second)
+	if _, ok := activityCurrent(path, a, now); ok {
+		t.Fatal("stale watcher accepted")
 	}
 }

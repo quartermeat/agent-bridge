@@ -340,7 +340,10 @@ func watchScreen(all []string, w, h int, v *watchView, origin string, now time.T
 		first = v.offset + 1
 		last = end
 	}
-	status := fmt.Sprintf("%s UTC %s lines %d–%d of %d %s | q c f | j/k ↑/↓ PgUp/Dn space g/G", now.UTC().Format("15:04:05"), origin, first, last, len(lines), watchFilterNames[v.filter])
+	status := fmt.Sprintf("q quit | %s %s %d–%d/%d %s | c f j/k PgUp/Dn g/G", now.UTC().Format("15:04:05"), origin, first, last, len(lines), watchFilterNames[v.filter])
+	if w < 60 {
+		status = fmt.Sprintf("q quit | %s %d–%d/%d %s | c f j/k g/G", origin, first, last, len(lines), watchFilterNames[v.filter])
+	}
 	if v.compact {
 		status += " compact"
 	}

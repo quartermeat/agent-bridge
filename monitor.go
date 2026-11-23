@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Snapshot combines bridge activity with machine-local GPU and model usage.
@@ -41,6 +42,7 @@ type AgentUsage struct {
 	ID            string       `json:"id"`
 	Provider      string       `json:"provider"`
 	Name          string       `json:"name"`
+	Task          string       `json:"task,omitempty"`
 	Phase         string       `json:"phase"`
 	Detail        string       `json:"detail,omitempty"`
 	ReportOrigin  string       `json:"report_origin,omitempty"`
@@ -174,6 +176,16 @@ func collectSnapshot() (Snapshot, error) {
 		a.UsageKnown = a.SessionID != ""
 		if err != nil {
 			s.Sources = append(s.Sources, SourceStatus{Name: a.Provider + "-usage", Detail: err.Error()})
+		}
+	}
+	codexTitles := readCodexTitles(filepath.Join(home, ".codex", "session_index.jsonl"))
+	for i := range s.Agents {
+		a := &s.Agents[i]
+		if a.Provider == "codex" {
+			a.Task = safeTask(codexTitles[a.SessionID])
+		}
+		if a.Task == "" && a.Cwd != "" {
+			a.Task = safeTask(filepath.Base(a.Cwd))
 		}
 	}
 	r, err := root()
@@ -327,7 +339,7 @@ func activityCurrent(path string, a activityFile, now time.Time) (int, bool) {
 	}
 	switch a.Phase {
 	case "thinking", "working", "tool":
-		if age > 5*time.Second {
+		if age > 30*time.Second {
 			return 0, false
 		}
 	case "idle", "waiting", "error":
@@ -366,6 +378,16 @@ func activityCurrent(path string, a activityFile, now time.Time) (int, bool) {
 		return 0, false
 	}
 	hostPID, _ := strconv.Atoi(string(args[4]))
+	if hostPID <= 0 {
+		return 0, false
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", hostPID))
+	if err != nil {
+		return 0, false
+	}
+	if close := bytes.LastIndex(stat, []byte(") ")); close < 0 || len(stat) <= close+2 || stat[close+2] == 'Z' || stat[close+2] == 'X' {
+		return 0, false
+	}
 	return hostPID, true
 }
 
@@ -427,12 +449,43 @@ func scanJSONLines(path string, visit func([]byte)) error {
 	}
 }
 
+func safeTask(value string) string {
+	value = strings.TrimSpace(value)
+	var b strings.Builder
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			r = ' '
+		} else if !unicode.IsPrint(r) {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= 120 {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func readCodexTitles(path string) map[string]string {
+	titles := map[string]string{}
+	_ = scanJSONLines(path, func(line []byte) {
+		var row struct {
+			ID         string `json:"id"`
+			ThreadName string `json:"thread_name"`
+		}
+		if json.Unmarshal(line, &row) == nil && row.ID != "" && row.ThreadName != "" {
+			titles[row.ID] = row.ThreadName
+		}
+	})
+	return titles
+}
 func readClaudeUsage(path string, a *AgentUsage) error {
 	byMessage := map[string]TokenUsage{}
 	cwds := map[string]int{}
 	err := scanJSONLines(path, func(line []byte) {
 		var row struct {
 			Type      string          `json:"type"`
+			AiTitle   string          `json:"aiTitle"`
 			Subtype   string          `json:"subtype"`
 			Timestamp string          `json:"timestamp"`
 			Error     json.RawMessage `json:"error"`
@@ -450,6 +503,10 @@ func readClaudeUsage(path string, a *AgentUsage) error {
 			} `json:"message"`
 		}
 		if json.Unmarshal(line, &row) != nil {
+			return
+		}
+		if row.Type == "ai-title" {
+			a.Task = safeTask(row.AiTitle)
 			return
 		}
 		if row.Type == "system" && row.Subtype == "api_error" {

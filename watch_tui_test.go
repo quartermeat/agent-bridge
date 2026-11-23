@@ -14,7 +14,7 @@ func TestWatchScreenClippingAndScroll(t *testing.T) {
 		t.Fatalf("bad viewport: %q", frame)
 	}
 	statusFrame := watchScreen(lines, 120, 4, &v, "daemon", time.Unix(0, 0))
-	if !strings.Contains(statusFrame, "lines 3–5") {
+	if !strings.Contains(statusFrame, "3–5/6") {
 		t.Fatalf("status range: %q", frame)
 	}
 	if !applyWatchKey(&v, "bottom", 6, 4) || v.offset != 3 {
@@ -155,5 +155,14 @@ func TestWatchFallbackAndStaleLimits(t *testing.T) {
 	s.Jobs = s.Jobs[1:]
 	if got := fallbackLabel(s.Jobs[0], s.Jobs); got != "fallback for halted" {
 		t.Fatalf("missing original: %q", got)
+	}
+}
+
+func TestWatchPhoneWidthShowsControlsAndAgent(t *testing.T) {
+	s := Snapshot{SampledAt: time.Now(), Agents: []AgentUsage{{ID: "agent", Provider: "codex", ActivityState: "active", Model: "model", Cwd: "/work"}}}
+	lines := renderWatchFrame(s, "direct", map[string]TokenUsage{})
+	frame := watchScreen(lines, 45, 8, &watchView{}, "direct", time.Now())
+	if !strings.Contains(frame, "q quit") || !strings.Contains(frame, "codex active model /work") {
+		t.Fatalf("phone frame lost controls or agent: %q", frame)
 	}
 }

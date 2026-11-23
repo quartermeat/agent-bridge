@@ -7,6 +7,7 @@ export PATH="$HOME/.local/bin:$PATH"
 shortcuts=$widget_home/.shortcuts
 state_dir=$widget_home/.local/state/agent-bridge/widget
 marker='# agent-bridge-termux-widget:v1'
+row_title_width=48
 snapshot_file=
 manual_refresh=0
 
@@ -19,7 +20,42 @@ label() {
   printf '%s' "${value:-project}"
 }
 
+row_title() {
+  local prefix=$1 task=$2 state=$3 suffix=${4:-} room
+  room=$((row_title_width - ${#prefix} - ${#state} - ${#suffix} - 6))
+  (( room < 0 )) && room=0
+  if (( ${#task} > room )); then
+    if (( room > 0 )); then
+      task=${task:0:room-1}
+      while [[ $task == *' ' ]]; do task=${task% }; done
+      task+='…'
+    else
+      task=
+    fi
+  fi
+  printf '%s · %s · %s%s' "$prefix" "$task" "$state" "$suffix"
+}
+
 owned() { [[ -f $1 && ! -L $1 && $(head -n 2 -- "$1" | tail -n 1) == "$marker" ]]; }
+
+monitor() {
+  local pid start saved_pid saved_start
+  mkdir -p -- "$state_dir"
+  exec 7>"$state_dir/monitor.lock"
+  if ! flock -n 7; then
+    if [[ -f $state_dir/monitor.pid ]] && read -r saved_pid saved_start < "$state_dir/monitor.pid" &&
+       proc_fields "$saved_pid" && [[ $proc_start == "$saved_start" ]]; then
+      "${WIDGET_ACTIVITY_CMD:-am}" start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.termux/.app.TermuxActivity >/dev/null
+    fi
+    return 0
+  fi
+  pid=$BASHPID
+  proc_fields "$pid" || return 1
+  start=$proc_start
+  printf '%s %s\n' "$pid" "$start" > "$state_dir/monitor.pid"
+  trap 'rm -f -- "$state_dir/monitor.pid"' EXIT
+  "${WIDGET_MONITOR_BIN:-agent-bridge}" watch
+}
 
 choose_decoder() {
   if [[ -x $HOME/.local/bin/gojq ]]; then printf '%s\n' "$HOME/.local/bin/gojq"
@@ -84,7 +120,7 @@ native_terminal() {
 # Every tap checks a new snapshot. The job helper verifies authoritative job metadata too.
 open_row() {
   local kind=$1 id=$2 expected_pid=${3:-} expected_start=${4:-} raw rows decoder
-  local row_kind row_id provider name cwd row_state launcher pid target_kind target_name health=unavailable found=0
+  local row_kind row_id provider role name cwd row_state launcher pid target_kind target_name health=unavailable found=0
   [[ $kind == status ]] && return 0
   [[ $kind == job || $kind == hook ]] || usage
   mkdir -p -- "$state_dir"
@@ -98,7 +134,7 @@ open_row() {
     agent-bridge snapshot > "$raw" || return 0
   fi
   decode "$raw" || return 0
-  while IFS= read -r -d '' row_kind && IFS= read -r -d '' row_id && IFS= read -r -d '' provider && IFS= read -r -d '' name && IFS= read -r -d '' cwd && IFS= read -r -d '' row_state && IFS= read -r -d '' launcher && IFS= read -r -d '' pid && IFS= read -r -d '' target_kind && IFS= read -r -d '' target_name; do
+  while IFS= read -r -d '' row_kind && IFS= read -r -d '' row_id && IFS= read -r -d '' provider && IFS= read -r -d '' role && IFS= read -r -d '' name && IFS= read -r -d '' cwd && IFS= read -r -d '' row_state && IFS= read -r -d '' launcher && IFS= read -r -d '' pid && IFS= read -r -d '' target_kind && IFS= read -r -d '' target_name; do
     if [[ $row_kind == health ]]; then health=$row_state; continue; fi
     if [[ $row_kind == "$kind" && $row_id == "$id" ]]; then
       (( found == 0 )) || return 0
@@ -119,8 +155,8 @@ open_row() {
   fi
 }
 refresh() {
-  local raw rows desired decoder health=unavailable changed=0 existing file tmp kind id provider name cwd row_state launcher pid target_kind target_name base title digest start
-  local -a ids=() kinds=() bases=() displays=() pids=() starts=()
+  local raw rows desired decoder health=unavailable changed=0 existing file tmp kind id provider role name cwd row_state launcher pid target_kind target_name base title digest start
+  local -a ids=() kinds=() bases=() displays=() states=() pids=() starts=()
   local -A counts=() used=()
   mkdir -p -- "$shortcuts/tasks" "$state_dir"
   chmod 700 "$state_dir"
@@ -142,29 +178,40 @@ refresh() {
     agent-bridge snapshot > "$raw" || : > "$raw"
   fi
   if [[ -s $raw ]] && decode "$raw"; then
-    while IFS= read -r -d '' kind && IFS= read -r -d '' id && IFS= read -r -d '' provider && IFS= read -r -d '' name && IFS= read -r -d '' cwd && IFS= read -r -d '' row_state && IFS= read -r -d '' launcher && IFS= read -r -d '' pid && IFS= read -r -d '' target_kind && IFS= read -r -d '' target_name; do
+    while IFS= read -r -d '' kind && IFS= read -r -d '' id && IFS= read -r -d '' provider && IFS= read -r -d '' role && IFS= read -r -d '' name && IFS= read -r -d '' cwd && IFS= read -r -d '' row_state && IFS= read -r -d '' launcher && IFS= read -r -d '' pid && IFS= read -r -d '' target_kind && IFS= read -r -d '' target_name; do
       if [[ $kind == health ]]; then
         health=$row_state
       elif [[ $kind == job || $kind == hook ]]; then
-        if [[ -z $id || $cwd != /* || ! -d $cwd ]]; then health=unavailable; continue; fi
+        [[ -n $id && $cwd == /* ]] || continue
+        [[ $kind != job || -d $cwd ]] || continue
         [[ $kind != job || $launcher == direct ]] || continue
         base=$(label "$name")
+        case $row_state in
+          active|running_job|has_running_children|running|starting) row_state=working ;;
+          approval_required) row_state='needs approval' ;;
+          ready) row_state=ready ;;
+          halted_usage) row_state='usage limit' ;;
+          error) row_state=error ;;
+          *) continue ;;
+        esac
+        case ${role,,} in epm) role=EPM;; coder) role=Coder;; *) role=$(label "$role");; esac
         display=$(label "$provider")
         case ${provider,,} in codex) display=Codex;; claude) display=Claude;; *) display=${display^};; esac
+        display="$display · $role"
         start=
         if [[ $kind == hook ]] && proc_fields "$pid"; then start=$proc_start; fi
-        ids+=("$id"); kinds+=("$kind"); bases+=("$base"); displays+=("$display"); pids+=("$pid"); starts+=("$start")
-        counts["$display · $base"]=$(( ${counts["$display · $base"]:-0} + 1 ))
+        ids+=("$id"); kinds+=("$kind"); bases+=("$base"); displays+=("$display"); states+=("$row_state"); pids+=("$pid"); starts+=("$start")
+        title=$(row_title "$display" "$base" "$row_state"); counts["$title"]=$(( ${counts["$title"]:-0} + 1 ))
       fi
     done < "$rows"
   fi
   if [[ $health == available ]]; then
     for (( i=0; i<${#ids[@]}; i++ )); do
       base=${bases[i]}
-      title="${displays[i]} · $base"
+      title=$(row_title "${displays[i]}" "$base" "${states[i]}")
       if (( ${counts["$title"]} > 1 )) || [[ -v used["$title"] ]] || { [[ -e $shortcuts/tasks/$title || -L $shortcuts/tasks/$title ]] && ! owned "$shortcuts/tasks/$title"; }; then
-        digest=$(printf '%s\0%s' "${kinds[i]}" "${ids[i]}" | sha256sum); digest=${digest:0:6}
-        title="${displays[i]} · $base · $digest"
+        digest=$(printf '%s\0%s' "${kinds[i]}" "${ids[i]}" | sha256sum); digest=${digest:0:4}
+        title=$(row_title "${displays[i]}" "$base" "${states[i]}" " · $digest")
       fi
       if [[ -v used["$title"] ]] || { [[ -e $shortcuts/tasks/$title || -L $shortcuts/tasks/$title ]] && ! owned "$shortcuts/tasks/$title"; }; then
         health=unavailable; break
@@ -172,28 +219,37 @@ refresh() {
       used["$title"]=1
       add_task "$title" "${kinds[i]}" "${ids[i]}" "${pids[i]}" "${starts[i]}"
     done
-    if (( ${#ids[@]} == 0 )); then add_task 'Codex · No working agents' status ''; fi
+    if (( ${#ids[@]} == 0 )); then add_task 'No agents' status ''; fi
   fi
   if [[ $health != available ]]; then
     rm -f -- "$desired"/*
-    add_task 'Codex · Status unavailable' status ''
+    add_task 'Status unavailable' status ''
   fi
   {
     printf '#!/data/data/com.termux/files/usr/bin/bash\n%s\n' "$marker"
     printf 'exec %q refresh --manual\n' "$script_dir/widget.sh"
   } > "$desired/Refresh widget"
   chmod 700 "$desired/Refresh widget"
+  {
+    printf '#!/data/data/com.termux/files/usr/bin/bash\n%s\n' "$marker"
+    printf 'exec %q monitor\n' "$script_dir/widget.sh"
+  } > "$desired/Agent monitor"
+  chmod 700 "$desired/Agent monitor"
   shopt -s nullglob
   for file in "$desired"/*; do
-    existing="$shortcuts/tasks/${file##*/}"
+    if [[ ${file##*/} == 'Agent monitor' ]]; then
+      existing="$shortcuts/Agent monitor"
+    else
+      existing="$shortcuts/tasks/${file##*/}"
+    fi
     if [[ -e $existing || -L $existing ]]; then
       if ! owned "$existing"; then
-        printf 'widget: refusing to replace unowned task: %s\n' "$existing" >&2
+        printf 'widget: refusing to replace unowned shortcut: %s\n' "$existing" >&2
         continue
       fi
       if cmp -s -- "$file" "$existing" && [[ -x $existing ]]; then continue; fi
     fi
-    tmp=$(mktemp "$shortcuts/tasks/.ab.XXXXXXXX")
+    tmp=$(mktemp "${existing%/*}/.ab.XXXXXXXX")
     cp -- "$file" "$tmp"
     chmod 700 "$tmp"
     mv -f -- "$tmp" "$existing"
@@ -201,6 +257,7 @@ refresh() {
   done
   for existing in "$shortcuts/tasks"/* "$shortcuts"/*; do
     owned "$existing" || continue
+    [[ $existing == "$shortcuts/Agent monitor" ]] && continue
     [[ -e $desired/${existing##*/} && $existing == "$shortcuts/tasks/"* ]] && continue
     rm -f -- "$existing"
     changed=1
@@ -240,6 +297,10 @@ case ${1:-} in
       "$script_dir/widget.sh" refresh || true
       sleep "${WIDGET_INTERVAL:-5}"
     done
+    ;;
+  monitor)
+    (( $# == 1 )) || usage
+    monitor
     ;;
   *) usage ;;
 esac
