@@ -214,9 +214,12 @@ func TestCodexPipeClosesProcessGroup(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		b, readErr := os.ReadFile(pidFile)
-		if readErr == nil {
-			childPID, _ = strconv.Atoi(strings.TrimSpace(string(b)))
-			break
+		if readErr == nil && strings.HasSuffix(string(b), "\n") {
+			pid, parseErr := strconv.Atoi(strings.TrimSuffix(string(b), "\n"))
+			if parseErr == nil && pid > 0 {
+				childPID = pid
+				break
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
