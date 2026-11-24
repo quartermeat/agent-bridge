@@ -11,7 +11,26 @@ row_title_width=48
 snapshot_file=
 manual_refresh=0
 
-usage() { printf 'usage: %s refresh [--manual] [--snapshot FILE] | open KIND ID [PID START] | watch\n' "$0" >&2; exit 2; }
+usage() { printf 'usage: %s refresh [--manual] [--snapshot FILE] | open KIND ID [PID START] | watch | monitor | new-epm\n' "$0" >&2; exit 2; }
+
+foreground_title() { [[ $1 == 'Agent monitor' || $1 == 'New Claude EPM' ]]; }
+
+new_epm() {
+  trap : INT
+  local status=0 claude_bin=${WIDGET_CLAUDE_BIN:-claude}
+  cd -- "$widget_home"
+  unset AGENT_BRIDGE_JOB_ID AGENT_BRIDGE_JOB_ROLE AGENT_BRIDGE_JOB_DEPTH
+  if ! command -v "$claude_bin" >/dev/null 2>&1; then
+    printf 'widget: Claude command not found: %s\n' "$claude_bin" >&2
+  else
+    "$claude_bin" || status=$?
+    if (( status != 0 )); then
+      printf 'widget: Claude exited with status %s\n' "$status" >&2
+    fi
+  fi
+  trap - INT
+  exec "${WIDGET_SHELL_BIN:-bash}" -l
+}
 
 label() {
   local value=${1##*/}
@@ -70,6 +89,7 @@ decode() { "$decoder" -s -j -f "$script_dir/snapshot.jq" "$1" > "$rows"; }
 # Background tasks avoid creating terminals when a row is tapped.
 add_task() {
   local title=$1 kind=$2 id=$3 pid=${4:-} start=${5:-} qkind qid qpid qstart
+  foreground_title "$title" && return 1
   printf -v qkind '%q' "$kind"; printf -v qid '%q' "$id"
   printf -v qpid '%q' "$pid"; printf -v qstart '%q' "$start"
   {
@@ -235,10 +255,15 @@ refresh() {
     printf 'exec %q monitor\n' "$script_dir/widget.sh"
   } > "$desired/Agent monitor"
   chmod 700 "$desired/Agent monitor"
+  {
+    printf '#!/data/data/com.termux/files/usr/bin/bash\n%s\n' "$marker"
+    printf 'exec %q new-epm\n' "$script_dir/widget.sh"
+  } > "$desired/New Claude EPM"
+  chmod 700 "$desired/New Claude EPM"
   shopt -s nullglob
   for file in "$desired"/*; do
-    if [[ ${file##*/} == 'Agent monitor' ]]; then
-      existing="$shortcuts/Agent monitor"
+    if foreground_title "${file##*/}"; then
+      existing="$shortcuts/${file##*/}"
     else
       existing="$shortcuts/tasks/${file##*/}"
     fi
@@ -257,8 +282,8 @@ refresh() {
   done
   for existing in "$shortcuts/tasks"/* "$shortcuts"/*; do
     owned "$existing" || continue
-    [[ $existing == "$shortcuts/Agent monitor" ]] && continue
-    [[ -e $desired/${existing##*/} && $existing == "$shortcuts/tasks/"* ]] && continue
+    if [[ ${existing%/*} == "$shortcuts" ]] && foreground_title "${existing##*/}"; then continue; fi
+    if [[ -e $desired/${existing##*/} && ${existing%/*} == "$shortcuts/tasks" ]] && ! foreground_title "${existing##*/}"; then continue; fi
     rm -f -- "$existing"
     changed=1
   done
@@ -301,6 +326,10 @@ case ${1:-} in
   monitor)
     (( $# == 1 )) || usage
     monitor
+    ;;
+  new-epm)
+    (( $# == 1 )) || usage
+    new_epm
     ;;
   *) usage ;;
 esac

@@ -195,6 +195,8 @@ Claude jobs use `AGENT_BRIDGE_CLAUDE_BIN` (default `claude`) and write stream JS
 
 ### Termux widget rows
 
+`New Claude EPM` is a foreground Termux:Widget shortcut in `~/.shortcuts/` that starts a fresh interactive Claude EPM session in the widget home directory on every tap. When Claude exits, the tab becomes a login shell. It remains available in all widget states. Place it as its own home-screen icon through the launcher's widget picker > **Termux:Widget** > **Termux shortcut (1x1)**. Foreground launch needs Termux **Display over other apps** permission.
+
 The home-screen widget shows each open direct job and each verified interactive Claude or Codex session as `Agent · ROLE · task · state`. Jobs use their recorded role and name. Interactive sessions use the EPM role and a sanitized title from Claude's newest `ai-title` record or Codex's newest `thread_name` index record; the project directory name is the fallback. Snapshot agents expose this as optional `task`. Prompts, responses, and tool output are never used as titles. The task is shortened to keep agent, role, and state visible within Termux:Widget's narrow label. State labels are `working`, `needs approval`, `ready`, `usage limit`, and `error`. Idle and unverified sessions are omitted; job sessions are shown once. The empty and unavailable labels are `No agents` and `Status unavailable`.
 
 A live hook watcher with a verified host process may retain an active session for 30 seconds after its heartbeat. Without a watcher, the active heartbeat limit remains five seconds. Missing job directories are skipped independently so other rows remain available.

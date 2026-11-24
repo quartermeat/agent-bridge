@@ -8,6 +8,8 @@ With no open rows, the widget shows `No agents`. If the bridge-jobs source or sn
 
 `Agent monitor` is a foreground shortcut in `~/.shortcuts/`. It opens `agent-bridge watch` even when there are no agents or the bridge is unavailable. Press `q` to exit. A second tap while the monitor is live brings Termux forward; the updater retains this shortcut while removing older marked foreground rows. User-owned files are preserved.
 
+`New Claude EPM` is another foreground shortcut in `~/.shortcuts/`. Every tap opens a fresh interactive `claude` session in the widget home directory, where `~/.claude/CLAUDE.md` supplies the EPM rules. After Claude exits, the same tab becomes a login shell. The shortcut is available with agents, no agents, or unavailable status. To put it on the home screen as its own icon, use the launcher's widget picker > **Termux:Widget** > **Termux shortcut (1x1)**, then select `New Claude EPM`. Foreground launch needs Termux **Display over other apps** permission.
+
 ## Requirements and install
 
 Install Termux:Widget and place its widget on the home screen. The package needs Bash, `flock`, coreutils, `agent-bridge`, and `gojq` or `jq`. Supply an executable `widget-job-view` with `WIDGET_JOB_VIEW_BIN=/path/to/widget-job-view`, put a prebuilt one on `PATH`, or have Go installed so setup builds `./cmd/widget-job-view` locally. Setup installs the helper to `~/.local/bin/widget-job-view`. The job helper uses Android's browser through `am`; no external file provider is needed.

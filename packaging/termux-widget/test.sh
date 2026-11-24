@@ -11,6 +11,7 @@ printf 'user shortcut\n' > "$home/.shortcuts/Codex · custom"
 printf 'user shortcut\n' > "$home/.shortcuts/tasks/Claude · custom"
 printf '#!/bin/sh\n# agent-bridge-termux-widget:v1\nexec codex\n' > "$home/.shortcuts/Codex · old row"
 printf '#!/bin/sh\n# agent-bridge-termux-widget:v1\nexec codex\n' > "$home/.shortcuts/Codex · shared"
+printf '#!/bin/sh\n# agent-bridge-termux-widget:v1\nexec claude\n' > "$home/.shortcuts/tasks/New Claude EPM"
 printf 'com.termux\0' > "$test_root/proc/999/cmdline"
 proc_fixture() {
   local pid=$1 start=$2 tty=${3:-9} parent=${4:-999} n
@@ -56,6 +57,7 @@ printf "old event copy\n" > "$home/.local/state/agent-bridge/widget/views/old.ht
 "$source_dir/widget.sh" refresh --snapshot "$test_root/active.json"
 [[ $(count_refreshes) -eq 1 ]]
 [[ -x "$home/.shortcuts/Agent monitor" && ! -e "$home/.shortcuts/tasks/Agent monitor" ]]
+[[ -x "$home/.shortcuts/New Claude EPM" && ! -e "$home/.shortcuts/tasks/New Claude EPM" ]]
 [[ ! -e "$home/.shortcuts/Codex · old row" && ! -e "$home/.shortcuts/Codex · shared" ]]
 [[ -f "$home/.shortcuts/Codex · custom" && -f "$home/.shortcuts/tasks/Claude · custom" ]]
 mapfile -t duplicates < <(find "$home/.shortcuts/tasks" -maxdepth 1 -type f -name 'Codex · Coder · * · working · *' | sort)
@@ -82,6 +84,7 @@ cp "$test_root/idle.json" "$WIDGET_LIVE_SNAPSHOT"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/idle.json"
 [[ -x "$home/.shortcuts/tasks/No agents" && $(count_refreshes) -eq 2 ]]
 [[ -x "$home/.shortcuts/Agent monitor" ]]
+[[ -x "$home/.shortcuts/New Claude EPM" && ! -e "$home/.shortcuts/tasks/New Claude EPM" ]]
 [[ ! -e ${duplicates[0]} && ! -e ${duplicates[1]} ]]
 "$home/.shortcuts/tasks/No agents"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/idle.json"
@@ -93,6 +96,7 @@ rm "$test_root/fail"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/down.json"
 [[ -x "$home/.shortcuts/tasks/Status unavailable" && ! -e $home/.local/state/agent-bridge/widget/broadcast-pending ]]
 [[ -x "$home/.shortcuts/Agent monitor" ]]
+[[ -x "$home/.shortcuts/New Claude EPM" && ! -e "$home/.shortcuts/tasks/New Claude EPM" ]]
 "$home/.shortcuts/tasks/Status unavailable"
 printf '{bad json\n' > "$test_root/bad.json"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/bad.json" 2> "$test_root/error.log"
@@ -138,6 +142,7 @@ chmod 700 "$setup_home/.local/bin/gojq" "$setup_home/.local/bin/agent-bridge" "$
   cmp -s "$WIDGET_JOB_VIEW_BIN" "$HOME/.local/bin/widget-job-view"
   [[ -x "$HOME/.shortcuts/tasks/No agents" ]]
   [[ -x "$HOME/.shortcuts/tasks/Refresh widget" ]]
+  [[ -x "$HOME/.shortcuts/New Claude EPM" && ! -e "$HOME/.shortcuts/tasks/New Claude EPM" ]]
   before=$(count_refreshes)
   "$HOME/.shortcuts/tasks/Refresh widget"
   [[ $(count_refreshes) -eq $((before + 1)) ]]
@@ -242,4 +247,52 @@ long_title=${long_rows[0]##*/}
 printf 'user monitor\n' > "$home/.shortcuts/Agent monitor"
 "$source_dir/widget.sh" refresh --snapshot "$test_root/idle.json" 2> "$test_root/error.log"
 [[ $(cat "$home/.shortcuts/Agent monitor") == 'user monitor' ]]
+# Foreground EPM launches are independent and return to a login shell.
+cat > "$test_root/claude-stub" <<'STUB'
+#!/data/data/com.termux/files/usr/bin/bash
+printf 'claude|%s|%s|%s|%s|%s\n' "$#" "$PWD" "${AGENT_BRIDGE_JOB_ID-unset}" "${AGENT_BRIDGE_JOB_ROLE-unset}" "${AGENT_BRIDGE_JOB_DEPTH-unset}" >> "$WIDGET_TEST_SESSION_LOG"
+exit "${WIDGET_TEST_CLAUDE_STATUS:-0}"
+STUB
+cat > "$test_root/shell-stub" <<'STUB'
+#!/data/data/com.termux/files/usr/bin/bash
+printf 'shell|%s|%s|%s|%s|%s\n' "$1" "$PWD" "${AGENT_BRIDGE_JOB_ID-unset}" "${AGENT_BRIDGE_JOB_ROLE-unset}" "${AGENT_BRIDGE_JOB_DEPTH-unset}" >> "$WIDGET_TEST_SESSION_LOG"
+STUB
+chmod 700 "$test_root/claude-stub" "$test_root/shell-stub"
+export WIDGET_CLAUDE_BIN=$test_root/claude-stub WIDGET_SHELL_BIN=$test_root/shell-stub
+export WIDGET_TEST_SESSION_LOG=$test_root/session.log
+(
+  export AGENT_BRIDGE_JOB_ID=worker AGENT_BRIDGE_JOB_ROLE=coder AGENT_BRIDGE_JOB_DEPTH=2
+  "$home/.shortcuts/New Claude EPM"
+  "$home/.shortcuts/New Claude EPM"
+  WIDGET_TEST_CLAUDE_STATUS=7 "$home/.shortcuts/New Claude EPM" 2> "$test_root/claude-error.log"
+  WIDGET_CLAUDE_BIN="$test_root/missing-claude" "$home/.shortcuts/New Claude EPM" 2> "$test_root/missing-error.log"
+)
+printf 'claude|0|%s|unset|unset|unset\nshell|-l|%s|unset|unset|unset\nclaude|0|%s|unset|unset|unset\nshell|-l|%s|unset|unset|unset\nclaude|0|%s|unset|unset|unset\nshell|-l|%s|unset|unset|unset\nshell|-l|%s|unset|unset|unset\n' "$home" "$home" "$home" "$home" "$home" "$home" "$home" > "$test_root/expected-session.log"
+cmp -s "$test_root/expected-session.log" "$WIDGET_TEST_SESSION_LOG"
+grep -Fq 'Claude exited with status 7' "$test_root/claude-error.log"
+WIDGET_TEST_CLAUDE_STATUS=130 "$home/.shortcuts/New Claude EPM" 2> "$test_root/interrupted-error.log"
+[[ $(tail -n 2 "$WIDGET_TEST_SESSION_LOG" | head -n 1) == "claude|0|$home|unset|unset|unset" ]]
+[[ $(tail -n 1 "$WIDGET_TEST_SESSION_LOG") == "shell|-l|$home|unset|unset|unset" ]]
+grep -Fq 'Claude exited with status 130' "$test_root/interrupted-error.log"
+grep -Fq 'Claude command not found:' "$test_root/missing-error.log"
+# A real terminal SIGINT reaches Claude and the launcher process group together.
+cat > "$test_root/claude-interrupt-stub" <<'STUB'
+#!/data/data/com.termux/files/usr/bin/bash
+printf 'claude started\n' >> "$WIDGET_TEST_INTERRUPT_LOG"
+kill -INT 0
+sleep 1
+printf 'claude survived\n' >> "$WIDGET_TEST_INTERRUPT_LOG"
+STUB
+chmod 700 "$test_root/claude-interrupt-stub"
+export WIDGET_TEST_INTERRUPT_LOG=$test_root/interrupt.log
+before=$(wc -l < "$WIDGET_TEST_SESSION_LOG")
+WIDGET_CLAUDE_BIN="$test_root/claude-interrupt-stub" setsid "$home/.shortcuts/New Claude EPM" 2> "$test_root/real-interrupt-error.log"
+[[ $(cat "$WIDGET_TEST_INTERRUPT_LOG") == 'claude started' ]]
+grep -Fq 'Claude exited with status 130' "$test_root/real-interrupt-error.log"
+[[ $(wc -l < "$WIDGET_TEST_SESSION_LOG") -eq $((before + 1)) ]]
+[[ $(tail -n 1 "$WIDGET_TEST_SESSION_LOG") == "shell|-l|$home|unset|unset|unset" ]]
+# An unowned foreground name is never replaced, including during cleanup.
+printf 'user epm\n' > "$home/.shortcuts/New Claude EPM"
+"$source_dir/widget.sh" refresh --snapshot "$test_root/idle.json" 2> "$test_root/error.log"
+[[ $(cat "$home/.shortcuts/New Claude EPM") == 'user epm' && ! -e "$home/.shortcuts/tasks/New Claude EPM" ]]
 printf 'widget fixtures: OK\n'
