@@ -805,7 +805,11 @@ func dispatchLaunch(r launchRecord, v modelVerdict) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := exec.Command(self, args...).CombinedOutput()
+	launchCmd := exec.Command(self, args...)
+	// The start process needs the marker to persist launcher metadata before a fast worker finishes.
+	// bridgeChildEnv removes it from the worker and nested model processes.
+	launchCmd.Env = append(os.Environ(), "AGENT_BRIDGE_LAUNCHER=launcher")
+	out, err := launchCmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("start: %w: %s", err, bytes.TrimSpace(out))
 	}

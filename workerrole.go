@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 const maxJobDepth = 3
@@ -69,8 +70,18 @@ func refuseWorkerCommand(args []string) error {
 	return refuseWorkerLaunch(false)
 }
 
+func bridgeChildEnv() []string {
+	var env []string
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, "AGENT_BRIDGE_LAUNCHER=") {
+			env = append(env, item)
+		}
+	}
+	return env
+}
+
 func jobEnv(j Job) []string {
-	return append(os.Environ(),
+	return append(bridgeChildEnv(),
 		"AGENT_BRIDGE_JOB_ID="+j.ID,
 		"AGENT_BRIDGE_JOB_ROLE="+j.Role,
 		"AGENT_BRIDGE_JOB_DEPTH="+strconv.Itoa(j.Depth),

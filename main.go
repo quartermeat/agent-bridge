@@ -27,6 +27,13 @@ type Job struct {
 	Model          string      `json:"model,omitempty"`
 	Effort         string      `json:"effort,omitempty"`
 	TimeLimit      string      `json:"time_limit,omitempty"`
+	NumCtx         int         `json:"num_ctx,omitempty"`
+	NumThread      int         `json:"num_thread,omitempty"`
+	NumPredict     int         `json:"num_predict,omitempty"`
+	Think          *bool       `json:"think,omitempty"`
+	KeepAlive      string      `json:"keep_alive,omitempty"`
+	MaxRounds      int         `json:"max_rounds,omitempty"`
+	Tools          string      `json:"tools,omitempty"`
 	Substitution   string      `json:"substitution,omitempty"`
 	FallbackFor    string      `json:"fallback_for,omitempty"`
 	Depth          int         `json:"depth"`
@@ -334,6 +341,9 @@ func start(args []string) error {
 	if profile.Agent != *agent {
 		return errors.New("profile agent does not match --agent")
 	}
+	if profile.Tools == "read" && (*write || *role != "coder") {
+		return errors.New("read tools require a read-only coder job")
+	}
 	if *modelName != "" {
 		if *agent != "ollama" || strings.ContainsAny(*modelName, " \t\n") {
 			return errors.New("--model requires a valid Ollama model name")
@@ -420,7 +430,13 @@ func start(args []string) error {
 	if len(contextFiles) != 0 {
 		prompt = contextPrompt(prompt, dir, contextFiles)
 	}
-	prompt = append([]byte(workerRoleBlock(id, *role)), prompt...)
+	if profile.Tools == "read" {
+		if len(prompt) > 2048 {
+			return errors.New("ollama-phone prompt exceeds 2048 bytes; put detail in a file under --cwd")
+		}
+	} else {
+		prompt = append([]byte(workerRoleBlock(id, *role)), prompt...)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "prompt.txt"), prompt, 0600); err != nil {
 		return err
 	}
@@ -432,6 +448,9 @@ func start(args []string) error {
 	if os.Getenv("AGENT_BRIDGE_LAUNCH_MODE") == "direct" {
 		launcher = "direct"
 	}
+	if os.Getenv("AGENT_BRIDGE_LAUNCHER") == "launcher" {
+		launcher = "launcher"
+	}
 	depth := 0
 	if spawner != nil {
 		depth = 1
@@ -440,7 +459,7 @@ func start(args []string) error {
 		parent, _ := readJob(*parentJob)
 		depth = parent.Depth + 1
 	}
-	j := Job{ID: id, Name: *name, Agent: *agent, Role: *role, Profile: profile.Name, Model: profile.Model, Effort: profile.Effort, TimeLimit: profile.TimeLimit.String(), Depth: depth, SpawnedBy: spawner, FallbackFor: *fallbackFor, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt"), ContextFiles: contextFiles}
+	j := Job{ID: id, Name: *name, Agent: *agent, Role: *role, Profile: profile.Name, Model: profile.Model, Effort: profile.Effort, TimeLimit: profile.TimeLimit.String(), NumCtx: profile.NumCtx, NumThread: profile.NumThread, NumPredict: profile.NumPredict, Think: profile.Think, KeepAlive: profile.KeepAlive.String(), MaxRounds: profile.MaxRounds, Tools: profile.Tools, Depth: depth, SpawnedBy: spawner, FallbackFor: *fallbackFor, Cwd: abs, Sandbox: sandbox, Launcher: launcher, Status: "queued", CreatedAt: time.Now().UTC(), EventsPath: filepath.Join(dir, "events.jsonl"), StderrPath: filepath.Join(dir, "stderr.log"), ResultPath: filepath.Join(dir, "result.txt"), ContextFiles: contextFiles}
 	if err := writeJob(j); err != nil {
 		return err
 	}
@@ -481,6 +500,7 @@ func start(args []string) error {
 		return nil
 	}
 	cmd := exec.Command(self, "_worker", id)
+	cmd.Env = bridgeChildEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin = nil
 	cmd.Stdout = nil
@@ -1081,8 +1101,11 @@ func stop(args []string) error {
 	if err := os.WriteFile(filepath.Join(dir, "stop"), nil, 0600); err != nil {
 		return err
 	}
-	if !alive(j.WorkerPID, j.WorkerStart) || !alive(j.CodexPID, j.CodexStart) {
+	if !alive(j.WorkerPID, j.WorkerStart) || j.Agent != "ollama" && !alive(j.CodexPID, j.CodexStart) {
 		return errors.New("job process is no longer running")
+	}
+	if j.Agent == "ollama" {
+		return syscall.Kill(-j.WorkerPID, syscall.SIGTERM)
 	}
 	return syscall.Kill(-j.CodexPID, syscall.SIGTERM)
 }

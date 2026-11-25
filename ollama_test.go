@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -143,5 +144,44 @@ func TestOllamaHostParsing(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", "ftp://example.test")
 	if _, err := ollamaBase(); err == nil || !strings.Contains(err.Error(), "OLLAMA_HOST") {
 		t.Fatal(err)
+	}
+}
+
+func TestOllamaExtractFormatOnlyWhenProvided(t *testing.T) {
+	t.Setenv("AGENT_BRIDGE_HOME", t.TempDir())
+	t.Setenv("AGENT_BRIDGE_STATE_DIR", t.TempDir())
+	formats := []bool{}
+	fakeOllama(t, func(req *http.Request) (*http.Response, error) {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		raw, ok := body["format"]
+		formats = append(formats, ok)
+		if ok {
+			var schema struct {
+				Type       string   `json:"type"`
+				Required   []string `json:"required"`
+				Properties map[string]struct {
+					Type string `json:"type"`
+				} `json:"properties"`
+				AdditionalProperties bool `json:"additionalProperties"`
+			}
+			if err := json.Unmarshal(raw, &schema); err != nil || schema.Type != "object" || schema.AdditionalProperties || len(schema.Required) != 2 || schema.Required[0] != "a" || schema.Required[1] != "b" || schema.Properties["a"].Type != "string" || schema.Properties["b"].Type != "string" {
+				t.Fatalf("schema: %s %v", raw, err)
+			}
+		}
+		return grokResponse(200, `{"message":{"content":"{}"}}`), nil
+	})
+	base := "http://localhost:11434"
+	if _, _, _, _, err := ollamaCompletion(context.Background(), base, "model", "system", "input"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), localFormatKey{}, localExtractSchema([]string{"a", "b"}))
+	if _, _, _, _, err := ollamaCompletion(ctx, base, "model", "system", "input"); err != nil {
+		t.Fatal(err)
+	}
+	if len(formats) != 2 || formats[0] || !formats[1] {
+		t.Fatalf("formats: %v", formats)
 	}
 }

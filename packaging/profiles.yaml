@@ -1,4 +1,16 @@
 profiles:
+  ollama-phone:
+    agent: ollama
+    model: qwen3:1.7b
+    effort: low
+    time_limit: 10m
+    num_ctx: 4096
+    num_thread: 3
+    num_predict: 512
+    think: false
+    keep_alive: 2m
+    max_rounds: 6
+    tools: read
   ollama-quick:
     agent: ollama
     model: qwen3-coder:30b

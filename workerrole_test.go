@@ -302,3 +302,12 @@ func TestCarlWorkerGuard(t *testing.T) {
 		})
 	}
 }
+
+func TestLauncherMarkerDoesNotReachWorkers(t *testing.T) {
+	t.Setenv("AGENT_BRIDGE_LAUNCHER", "launcher")
+	for _, value := range jobEnv(Job{ID: "child", Role: "coder"}) {
+		if strings.HasPrefix(value, "AGENT_BRIDGE_LAUNCHER=") {
+			t.Fatalf("launcher marker leaked: %s", value)
+		}
+	}
+}

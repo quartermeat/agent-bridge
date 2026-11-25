@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,19 +15,24 @@ import (
 var defaultProfiles embed.FS
 
 type Profile struct {
-	Name      string
-	Agent     string
-	Model     string
-	Effort    string
-	TimeLimit time.Duration
+	Name                                     string
+	Agent                                    string
+	Model                                    string
+	Effort                                   string
+	TimeLimit                                time.Duration
+	NumCtx, NumThread, NumPredict, MaxRounds int
+	Think                                    *bool
+	KeepAlive                                time.Duration
+	Tools                                    string
 }
 
-var profileOrder = []string{"ollama-quick", "codex-quick", "claude-quick", "ollama-std", "codex-std", "claude-std", "ollama-epm", "codex-deep", "claude-epm", "claude-deep"}
+var profileOrder = []string{"ollama-phone", "ollama-quick", "codex-quick", "claude-quick", "ollama-std", "codex-std", "claude-std", "ollama-epm", "codex-deep", "claude-epm", "claude-deep"}
 
 func parseProfiles(data []byte) (map[string]Profile, error) {
 	profiles := map[string]Profile{}
 	name := ""
 	seen := map[string]bool{}
+	fields := map[string]bool{}
 	header := false
 	for n, raw := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(raw) == "" || strings.HasPrefix(strings.TrimSpace(raw), "#") {
@@ -60,6 +66,10 @@ func parseProfiles(data []byte) (map[string]Profile, error) {
 		}
 		value = strings.TrimSpace(value)
 		p := profiles[name]
+		if fields[name+"/"+key] {
+			return nil, fmt.Errorf("duplicate %s", key)
+		}
+		fields[name+"/"+key] = true
 		switch key {
 		case "agent":
 			if p.Agent != "" {
@@ -85,6 +95,38 @@ func parseProfiles(data []byte) (map[string]Profile, error) {
 			if err != nil {
 				return nil, err
 			}
+		case "num_ctx", "num_thread", "num_predict", "max_rounds":
+			n, err := strconv.Atoi(value)
+			if err != nil || n <= 0 {
+				return nil, fmt.Errorf("invalid %s", key)
+			}
+			switch key {
+			case "num_ctx":
+				p.NumCtx = n
+			case "num_thread":
+				p.NumThread = n
+			case "num_predict":
+				p.NumPredict = n
+			case "max_rounds":
+				p.MaxRounds = n
+			}
+		case "think":
+			b, err := strconv.ParseBool(value)
+			if err != nil || value != "true" && value != "false" {
+				return nil, errors.New("invalid think")
+			}
+			p.Think = &b
+		case "keep_alive":
+			var err error
+			p.KeepAlive, err = time.ParseDuration(value)
+			if err != nil || p.KeepAlive <= 0 {
+				return nil, errors.New("invalid keep_alive")
+			}
+		case "tools":
+			if value != "full" && value != "read" {
+				return nil, errors.New("invalid tools")
+			}
+			p.Tools = value
 		default:
 			return nil, fmt.Errorf("unknown profile field %q", key)
 		}
@@ -94,7 +136,7 @@ func parseProfiles(data []byte) (map[string]Profile, error) {
 		return nil, errors.New("no profiles")
 	}
 	for name, p := range profiles {
-		if p.Agent != "claude" && p.Agent != "codex" && p.Agent != "ollama" || p.Model == "" || strings.ContainsAny(p.Model, " \t\n") || p.TimeLimit <= 0 || p.Effort != "low" && p.Effort != "medium" && p.Effort != "high" {
+		if p.Agent != "claude" && p.Agent != "codex" && p.Agent != "ollama" || p.Model == "" || strings.ContainsAny(p.Model, " \t\n") || p.TimeLimit <= 0 || p.Effort != "low" && p.Effort != "medium" && p.Effort != "high" || p.Agent != "ollama" && (p.NumCtx != 0 || p.NumThread != 0 || p.NumPredict != 0 || p.MaxRounds != 0 || p.Think != nil || p.KeepAlive != 0 || p.Tools != "") {
 			return nil, fmt.Errorf("invalid profile %q", name)
 		}
 	}

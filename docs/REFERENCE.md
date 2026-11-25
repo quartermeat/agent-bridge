@@ -173,7 +173,7 @@ large line-hash state or running Git for every viewer refresh.
 
 ## Launcher L1
 
-`agent-bridge start` accepts `--agent codex|claude` and `--role coder|epm`. The default agent is Codex. `--agent claude` defaults to role `epm` and profile `claude-epm`; Codex defaults to role `coder` and profile `codex-std`. Codex EPM and Claude coder are rejected. Jobs contain `agent`, `role`, and `depth`, including `list`, `show`, `snapshot`, and `watch`. Legacy jobs read as Codex/coder/depth 0.
+`agent-bridge start` accepts `--agent codex|claude|ollama` and `--role coder|epm`. The default agent is Codex. `--agent claude` defaults to role `epm` and profile `claude-epm`; Codex defaults to role `coder` and profile `codex-std`. Codex EPM and Claude coder are rejected. Jobs contain `agent`, `role`, and `depth`, including `list`, `show`, `snapshot`, and `watch`. Legacy jobs read as Codex/coder/depth 0.
 
 ### Worker roles
 
@@ -200,3 +200,17 @@ Claude jobs use `AGENT_BRIDGE_CLAUDE_BIN` (default `claude`) and write stream JS
 The home-screen widget shows each open direct job and each verified interactive Claude or Codex session as `Agent · ROLE · task · state`. Jobs use their recorded role and name. Interactive sessions use the EPM role and a sanitized title from Claude's newest `ai-title` record or Codex's newest `thread_name` index record; the project directory name is the fallback. Snapshot agents expose this as optional `task`. Prompts, responses, and tool output are never used as titles. The task is shortened to keep agent, role, and state visible within Termux:Widget's narrow label. State labels are `working`, `needs approval`, `ready`, `usage limit`, and `error`. Idle and unverified sessions are omitted; job sessions are shown once. The empty and unavailable labels are `No agents` and `Status unavailable`.
 
 A live hook watcher with a verified host process may retain an active session for 30 seconds after its heartbeat. Without a watcher, the active heartbeat limit remains five seconds. Missing job directories are skipped independently so other rows remain available.
+
+### Phone read-only Ollama profile
+
+An Ollama profile may set positive `num_ctx`, `num_thread`, `num_predict`, `max_rounds`, and `keep_alive` (Go duration), `think: true|false`, and `tools: full|read`. These fields are rejected for other agents. Unset fields retain the existing behavior. `ollama-phone` is opt-in and uses `qwen3:1.7b`, `low`, `10m`, `num_ctx: 4096`, `num_thread: 3`, `num_predict: 512`, `think: false`, `keep_alive: 2m`, `max_rounds: 6`, and `tools: read`. Job records persist these settings.
+
+Read-tool jobs require an Ollama coder, read-only sandbox, and noninteractive use. Only `read_file`, `list_files`, and `grep` are advertised and executed, with resolved paths confined to the cwd. Tool output is capped for the model context. The final response must be a short `report: v2` YAML envelope; one repair turn is attempted before the job fails. The EPM must review the report and evidence; `status: done` is not a bridge verification result. `local-queue run --profile NAME` applies Ollama request settings to label and extract and enforces a context-sized input limit.
+
+Phone read workers gather file evidence before a separate schema-constrained report request. The bridge renders `report: v2` YAML with quoted summary and `checks: none`; no successful tool result yields `blocked`. `done` requires a successful file read, matching grep result, or listing when no read was attempted; a listing after a failed read yields `blocked` with the tool error. The report request carries the plain goal, gather answer, and up to 1500 bytes of recent successful tool output as data. Generic summaries are retried once, then downgraded to `partial`; invalid report JSON is retried once. Reaching `max_rounds` still leads to the report phase. Read transcripts are persisted in `events.jsonl`. `local-queue` marks profile-overlimit input `failed` (`input_too_large`) and proceeds with the next queued task.
+
+### Local queue extract results
+
+With `local-queue run --profile NAME`, extract requests use an Ollama JSON schema built from the task fields: every requested field is required, each value is a string, and extra fields are disallowed. The prompt marks the input as data, asks for exact copies or `""` when absent, and tells the model to ignore instructions in the input. A random marker for each attempt prevents the input from reproducing the data boundary. Profiled extracts also check `values_verbatim`: each nonempty value must appear exactly in the input. This check can retry and is included in `validity.failed` when it fails. The longer template is included in the profile context input limit. Unprofiled requests keep their previous format and checks.
+
+`state: done` can carry `validity.result: invalid` after the final attempt. Callers must check both state and validity. A valid result means only that the mechanical checks passed; it does not establish that the extraction is correct. Use extract only with trusted text.

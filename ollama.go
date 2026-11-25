@@ -21,6 +21,7 @@ import (
 var localCompletionCounter atomic.Uint64
 var localModelSerial sync.Mutex
 
+type localProfileKey struct{}
 type localActivityRoleKey struct{}
 type localActivityIDKey struct{}
 
@@ -106,6 +107,11 @@ func ollamaListModels(ctx context.Context, base string) error {
 func ollamaCompletion(ctx context.Context, base, model, system, prompt string) (string, TokenUsage, int, string, error) {
 	localModelSerial.Lock()
 	defer localModelSerial.Unlock()
+	unlock, lockErr := harnessModelLock(ctx)
+	if lockErr != nil {
+		return "", TokenUsage{}, 0, "", lockErr
+	}
+	defer unlock()
 	role := "completion"
 	if value, ok := ctx.Value(localActivityRoleKey{}).(string); ok && value != "" {
 		role = value
@@ -147,6 +153,30 @@ func ollamaCompletion(ctx context.Context, base, model, system, prompt string) (
 	}
 	messages = append(messages, map[string]string{"role": "user", "content": prompt})
 	request := map[string]any{"model": model, "messages": messages, "stream": false}
+	if format, ok := ctx.Value(localFormatKey{}).(map[string]any); ok {
+		request["format"] = format
+	}
+	if profile, ok := ctx.Value(localProfileKey{}).(Profile); ok {
+		options := map[string]any{}
+		if profile.NumCtx > 0 {
+			options["num_ctx"] = profile.NumCtx
+		}
+		if profile.NumThread > 0 {
+			options["num_thread"] = profile.NumThread
+		}
+		if profile.NumPredict > 0 {
+			options["num_predict"] = profile.NumPredict
+		}
+		if len(options) > 0 {
+			request["options"] = options
+		}
+		if profile.Think != nil {
+			request["think"] = *profile.Think
+		}
+		if profile.KeepAlive > 0 {
+			request["keep_alive"] = profile.KeepAlive.String()
+		}
+	}
 	if role == "dispatcher" {
 		request["options"] = map[string]any{"temperature": 0}
 	}
